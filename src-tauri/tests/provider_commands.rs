@@ -373,6 +373,7 @@ command = "say"
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: true, // 启用 Codex
                 gemini: false,
                 grokbuild: false,

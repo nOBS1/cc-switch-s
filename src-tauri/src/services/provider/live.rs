@@ -1435,6 +1435,23 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
 /// Returns `Ok(true)` if a provider was actually imported,
 /// `Ok(false)` if skipped (providers already exist for this app).
 pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
+    import_default_config_from_live_app(state, app_type.clone(), app_type)
+}
+
+/// Import the official Claude Code live settings into Cometix's independent
+/// provider table. This is only used by the explicit Cometix import action;
+/// startup import continues to read Cometix's own live directory.
+pub(super) fn import_official_claude_config_as_cometix_default(
+    state: &AppState,
+) -> Result<bool, AppError> {
+    import_default_config_from_live_app(state, AppType::ClaudeCometix, AppType::Claude)
+}
+
+fn import_default_config_from_live_app(
+    state: &AppState,
+    app_type: AppType,
+    live_source_app_type: AppType,
+) -> Result<bool, AppError> {
     // Additive mode apps (OpenCode, OpenClaw) should use their dedicated
     // import_xxx_providers_from_live functions, not this generic default config import
     if app_type.is_additive_mode() {
@@ -1456,7 +1473,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     // 典型触发场景：代理接管开启时切换 app_config_dir 并重启，新数据库首启导入。
     if state
         .proxy_service
-        .detect_takeover_in_live_config_for_app(&app_type)
+        .detect_takeover_in_live_config_for_app(&live_source_app_type)
     {
         return Err(AppError::localized(
             "provider.import.live_taken_over",
@@ -1483,7 +1500,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
             settings
         }
         AppType::Claude | AppType::ClaudeCometix => {
-            let settings_path = claude_settings_path_for(&app_type);
+            let settings_path = claude_settings_path_for(&live_source_app_type);
             if !settings_path.exists() {
                 return Err(AppError::localized(
                     "claude.live.missing",

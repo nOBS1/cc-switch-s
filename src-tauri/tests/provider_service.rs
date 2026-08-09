@@ -162,6 +162,7 @@ command = "say"
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: true,
                 gemini: false,
                 grokbuild: false,
@@ -1095,6 +1096,7 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: true,
                 gemini: false,
                 grokbuild: false,
@@ -1194,6 +1196,7 @@ fn reapply_codex_official_live_projects_mcp_despite_broken_claude_json() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: true,
                 gemini: false,
                 grokbuild: false,
@@ -1287,6 +1290,7 @@ fn switch_codex_projects_mcp_despite_broken_claude_json() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: true,
                 gemini: false,
                 grokbuild: false,
@@ -1351,6 +1355,7 @@ fn sync_all_enabled_reports_broken_app_but_projects_the_rest() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: true,
                 gemini: false,
                 grokbuild: false,

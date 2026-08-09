@@ -235,7 +235,13 @@ export function ProviderList({
         if (appId === "claude-desktop") {
           queryClient.invalidateQueries({ queryKey: ["claudeDesktopStatus"] });
         }
-        toast.success(t("provider.importCurrentDescription"));
+        toast.success(
+          t(
+            appId === "claude-cometix"
+              ? "provider.importOfficialClaudeDescription"
+              : "provider.importCurrentDescription",
+          ),
+        );
       } else {
         toast.info(t("provider.noProviders"));
       }

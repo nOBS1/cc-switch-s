@@ -4,9 +4,10 @@ use std::fs;
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_mcp_path, get_claude_mcp_status, get_claude_settings_path, get_grok_config_path,
-    import_default_config_test_hook, read_claude_mcp_config, update_settings, AppError,
-    AppSettings, AppType, McpApps, McpServer, McpService, MultiAppConfig, ProviderService,
+    get_claude_cometix_settings_path, get_claude_mcp_path, get_claude_mcp_status,
+    get_claude_settings_path, get_grok_config_path, import_default_config_test_hook,
+    read_claude_mcp_config, update_settings, AppError, AppSettings, AppType, McpApps, McpServer,
+    McpService, MultiAppConfig, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -65,6 +66,70 @@ fn import_default_config_claude_persists_provider() {
     assert!(
         db_path.exists(),
         "importing default config should persist to cc-switch.db"
+    );
+}
+
+#[test]
+fn import_default_config_cometix_reads_official_claude_without_mutating_it() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let official_path = get_claude_settings_path();
+    let cometix_path = get_claude_cometix_settings_path();
+    if let Some(parent) = official_path.parent() {
+        fs::create_dir_all(parent).expect("create official claude settings dir");
+    }
+    let settings = json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "official-source-key",
+            "ANTHROPIC_BASE_URL": "https://api.official-source.test"
+        }
+    });
+    let original_contents =
+        serde_json::to_string_pretty(&settings).expect("serialize official settings");
+    fs::write(&official_path, &original_contents).expect("seed official claude settings.json");
+    assert!(
+        !cometix_path.exists(),
+        "the Cometix live config must be absent to reproduce the import bug"
+    );
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::ClaudeCometix);
+    let state = create_test_state_with_config(&config).expect("create test state");
+
+    import_default_config_test_hook(&state, AppType::ClaudeCometix)
+        .expect("Cometix import should read the official Claude source config");
+
+    let cometix_providers = state
+        .db
+        .get_all_providers(AppType::ClaudeCometix.as_str())
+        .expect("get Cometix providers");
+    let imported = cometix_providers
+        .get("default")
+        .expect("official Claude settings should be imported into Cometix default");
+    assert_eq!(imported.settings_config, settings);
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::ClaudeCometix.as_str())
+            .expect("get Cometix current provider")
+            .as_deref(),
+        Some("default")
+    );
+
+    assert!(
+        state
+            .db
+            .get_all_providers(AppType::Claude.as_str())
+            .expect("get official Claude providers")
+            .is_empty(),
+        "importing into Cometix must not write the official Claude provider table"
+    );
+    assert_eq!(
+        fs::read_to_string(&official_path).expect("read official Claude settings after import"),
+        original_contents,
+        "importing into Cometix must not modify the official Claude settings file"
     );
 }
 
@@ -404,6 +469,7 @@ command = "echo"
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: true,
                 gemini: false,
                 grokbuild: false,
@@ -549,6 +615,7 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: false, // 初始未启用
                 gemini: false,
                 grokbuild: false,
@@ -615,6 +682,7 @@ fn enabling_codex_mcp_skips_when_codex_dir_missing() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -661,6 +729,7 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
             }),
             apps: McpApps {
                 claude: true,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -696,6 +765,7 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -830,6 +900,7 @@ fn enabling_gemini_mcp_skips_when_gemini_dir_missing() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -886,6 +957,7 @@ fn enabling_claude_mcp_skips_when_claude_config_absent() {
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -942,6 +1014,7 @@ fn explicit_default_claude_dir_keeps_default_split_mcp_path() {
             }),
             apps: McpApps {
                 claude: true,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -999,6 +1072,7 @@ fn custom_claude_dir_writes_mcp_inside_config_dir() {
             }),
             apps: McpApps {
                 claude: true,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -1079,6 +1153,7 @@ fn custom_claude_dir_sync_does_not_copy_default_profile() {
             }),
             apps: McpApps {
                 claude: true,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -1219,6 +1294,7 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
             }),
             apps: McpApps {
                 claude: false,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -1242,6 +1318,7 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
             }),
             apps: McpApps {
                 claude: true,
+                claude_cometix: false,
                 codex: false,
                 gemini: false,
                 grokbuild: false,

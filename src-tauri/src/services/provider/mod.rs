@@ -4051,6 +4051,13 @@ impl ProviderService {
         import_default_config(state, app_type)
     }
 
+    /// Import official Claude Code settings into Cometix's independent data domain.
+    pub fn import_official_claude_config_as_cometix_default(
+        state: &AppState,
+    ) -> Result<bool, AppError> {
+        live::import_official_claude_config_as_cometix_default(state)
+    }
+
     pub fn should_import_default_config_on_startup(
         state: &AppState,
         app_type: &AppType,

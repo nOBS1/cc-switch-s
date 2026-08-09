@@ -158,7 +158,11 @@ fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result
         }
     }
 
-    let imported = ProviderService::import_default_config(state, app_type.clone())?;
+    let imported = if matches!(app_type, AppType::ClaudeCometix) {
+        ProviderService::import_official_claude_config_as_cometix_default(state)?
+    } else {
+        ProviderService::import_default_config(state, app_type.clone())?
+    };
 
     if imported {
         // Extract common config snippet (mirrors old startup logic in lib.rs)

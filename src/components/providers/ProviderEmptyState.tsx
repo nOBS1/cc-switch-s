@@ -28,7 +28,11 @@ export function ProviderEmptyState({
       </div>
       <h3 className="text-lg font-semibold">{t("provider.noProviders")}</h3>
       <p className="mt-2 max-w-lg text-sm text-muted-foreground">
-        {t("provider.noProvidersDescription")}
+        {t(
+          appId === "claude-cometix"
+            ? "provider.noProvidersDescriptionCometix"
+            : "provider.noProvidersDescription",
+        )}
       </p>
       {showSnippetHint && (
         <p className="mt-1 max-w-lg text-sm text-muted-foreground">
@@ -43,11 +47,13 @@ export function ProviderEmptyState({
         {onImport && (
           <Button onClick={onImport}>
             <Download className="mr-2 h-4 w-4" />
-            {appId === "claude-desktop"
-              ? t("provider.importFromClaude", {
-                  defaultValue: "将 Claude Code 中已有的供应商导入",
-                })
-              : t("provider.importCurrent")}
+            {appId === "claude-cometix"
+              ? t("provider.importOfficialClaude")
+              : appId === "claude-desktop"
+                ? t("provider.importFromClaude", {
+                    defaultValue: "将 Claude Code 中已有的供应商导入",
+                  })
+                : t("provider.importCurrent")}
           </Button>
         )}
         {onCreate && (
