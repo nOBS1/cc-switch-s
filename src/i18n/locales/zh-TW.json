@@ -811,6 +811,7 @@
     "updateAllTools": "全部更新（{{count}}）",
     "currentVersion": "目前版本",
     "latestVersion": "最新版本",
+    "cometixVersionSource": "版本來源：GitHub Releases · 安裝/升級：npm",
     "updateAvailableShort": "可更新",
     "toolInstall": "安裝",
     "toolUpdate": "更新",

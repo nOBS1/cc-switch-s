@@ -10,6 +10,7 @@ const requiredKeys = [
   "updateAllTools",
   "currentVersion",
   "latestVersion",
+  "cometixVersionSource",
   "updateAvailableShort",
   "toolInstall",
   "toolUpdate",

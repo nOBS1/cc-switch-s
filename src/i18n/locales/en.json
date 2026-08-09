@@ -810,6 +810,7 @@
     "updateAllTools": "Update All ({{count}})",
     "currentVersion": "Current Version",
     "latestVersion": "Latest Version",
+    "cometixVersionSource": "Source: GitHub Releases · install/update: npm",
     "updateAvailableShort": "Update",
     "toolInstall": "Install",
     "toolUpdate": "Update",

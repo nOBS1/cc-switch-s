@@ -1104,9 +1104,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                     </span>
                   </div>
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">
-                      {t("settings.latestVersion")}
-                    </span>
+                    <div className="flex flex-col text-muted-foreground">
+                      <span>{t("settings.latestVersion")}</span>
+                      {toolName === "claude-cometix" && (
+                        <span className="text-[9px] leading-tight">
+                          {t("settings.cometixVersionSource")}
+                        </span>
+                      )}
+                    </div>
                     <span className="min-w-0 truncate font-mono text-foreground">
                       {isToolVersionLoading
                         ? t("common.loading")

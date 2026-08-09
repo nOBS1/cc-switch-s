@@ -810,6 +810,7 @@
     "updateAllTools": "すべて更新（{{count}}）",
     "currentVersion": "現在のバージョン",
     "latestVersion": "最新バージョン",
+    "cometixVersionSource": "バージョン元：GitHub Releases · インストール/更新：npm",
     "updateAvailableShort": "更新あり",
     "toolInstall": "インストール",
     "toolUpdate": "更新",

@@ -124,6 +124,23 @@ const VALID_TOOLS: [&str; 8] = [
 
 const COMETIX_CLAUDE_TOOL: &str = "claude-cometix";
 const COMETIX_CLAUDE_PACKAGE: &str = "@cometix/claude-code";
+const COMETIX_CLAUDE_REPO: &str = "CometixSpace/claude-code";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeLatestVersionSource {
+    Npm(&'static str),
+    GithubRelease(&'static str),
+}
+
+fn claude_latest_version_source(tool: &str) -> Option<ClaudeLatestVersionSource> {
+    match tool {
+        "claude" => Some(ClaudeLatestVersionSource::Npm("@anthropic-ai/claude-code")),
+        COMETIX_CLAUDE_TOOL => Some(ClaudeLatestVersionSource::GithubRelease(
+            COMETIX_CLAUDE_REPO,
+        )),
+        _ => None,
+    }
+}
 
 /// Lifecycle uses a distinct tool id for the Cometix distribution, while both
 /// distributions intentionally expose the same `claude` executable and share
@@ -842,12 +859,15 @@ async fn get_single_tool_version_impl(
     //    fetch_npm_latest_for_tool / npm_prerelease_tags）
     let local = local_version.as_deref();
     let latest_version = match tool {
-        "claude" => {
-            fetch_npm_latest_for_tool(&client, "@anthropic-ai/claude-code", tool, local).await
-        }
-        COMETIX_CLAUDE_TOOL => {
-            fetch_npm_latest_for_tool(&client, COMETIX_CLAUDE_PACKAGE, tool, local).await
-        }
+        "claude" | COMETIX_CLAUDE_TOOL => match claude_latest_version_source(tool) {
+            Some(ClaudeLatestVersionSource::Npm(package)) => {
+                fetch_npm_latest_for_tool(&client, package, tool, local).await
+            }
+            Some(ClaudeLatestVersionSource::GithubRelease(repo)) => {
+                fetch_github_latest_version(&client, repo).await
+            }
+            None => None,
+        },
         "codex" => fetch_npm_latest_for_tool(&client, "@openai/codex", tool, local).await,
         "gemini" => fetch_npm_latest_for_tool(&client, "@google/gemini-cli", tool, local).await,
         "grok" => fetch_npm_latest_for_tool(&client, "@xai-official/grok", tool, local).await,
@@ -4793,6 +4813,20 @@ mod tests {
             &launcher
         ));
         assert!(!tool_installation_matches("claude", &launcher, &launcher));
+    }
+
+    #[test]
+    fn cometix_latest_version_uses_github_releases() {
+        assert_eq!(
+            claude_latest_version_source(COMETIX_CLAUDE_TOOL),
+            Some(ClaudeLatestVersionSource::GithubRelease(
+                "CometixSpace/claude-code"
+            ))
+        );
+        assert_eq!(
+            claude_latest_version_source("claude"),
+            Some(ClaudeLatestVersionSource::Npm("@anthropic-ai/claude-code"))
+        );
     }
 
     #[cfg(target_os = "windows")]
