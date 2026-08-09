@@ -38,6 +38,7 @@ import {
   type AppId,
   type ProviderSwitchEvent,
 } from "@/lib/api";
+import { toBackendAppId, type UiAppId } from "@/lib/api/types";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
@@ -125,8 +126,9 @@ const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
 
 const STORAGE_KEY = "cc-switch-last-app";
-const VALID_APPS: AppId[] = [
+const VALID_APPS: UiAppId[] = [
   "claude",
+  "claude-cometix",
   "claude-desktop",
   "codex",
   "gemini",
@@ -136,8 +138,8 @@ const VALID_APPS: AppId[] = [
   "hermes",
 ];
 
-const getInitialApp = (): AppId => {
-  const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
+const getInitialApp = (): UiAppId => {
+  const saved = localStorage.getItem(STORAGE_KEY) as UiAppId | null;
   if (saved && VALID_APPS.includes(saved)) {
     return saved;
   }
@@ -174,9 +176,10 @@ function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
+  const [activeApp, setActiveApp] = useState<UiAppId>(getInitialApp);
+  const providerApp: AppId = toBackendAppId(activeApp);
   const sharedFeatureApp: AppId =
-    activeApp === "claude-desktop" ? "claude" : activeApp;
+    activeApp === "claude-desktop" ? "claude" : providerApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
@@ -203,8 +206,9 @@ function App() {
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
   const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
-  const visibleApps: VisibleApps = settingsData?.visibleApps ?? {
+  const visibleApps: VisibleApps = {
     claude: true,
+    "claude-cometix": true,
     "claude-desktop": true,
     codex: true,
     gemini: true,
@@ -212,10 +216,12 @@ function App() {
     opencode: true,
     openclaw: true,
     hermes: true,
+    ...settingsData?.visibleApps,
   };
 
-  const getFirstVisibleApp = (): AppId => {
+  const getFirstVisibleApp = (): UiAppId => {
     if (visibleApps.claude) return "claude";
+    if (visibleApps["claude-cometix"]) return "claude-cometix";
     if (visibleApps["claude-desktop"]) return "claude-desktop";
     if (visibleApps.codex) return "codex";
     if (visibleApps.gemini) return "gemini";
@@ -278,15 +284,15 @@ function App() {
     takeoverStatus,
     status: proxyStatus,
   } = useProxyStatus();
-  const isCurrentAppTakeoverActive = takeoverStatus?.[activeApp] || false;
+  const isCurrentAppTakeoverActive = takeoverStatus?.[providerApp] || false;
   const activeProviderId = useMemo(() => {
     const target = proxyStatus?.active_targets?.find(
-      (t) => t.app_type === activeApp,
+      (t) => t.app_type === providerApp,
     );
     return target?.provider_id;
-  }, [proxyStatus?.active_targets, activeApp]);
+  }, [proxyStatus?.active_targets, providerApp]);
 
-  const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
+  const { data, isLoading, refetch } = useProvidersQuery(providerApp, {
     isProxyRunning,
   });
   const providers = useMemo(() => data?.providers ?? {}, [data]);
@@ -319,7 +325,7 @@ function App() {
     saveUsageScript,
     setAsDefaultModel,
   } = useProviderActions(
-    activeApp,
+    providerApp,
     isProxyRunning,
     isProxyRunning && isCurrentAppTakeoverActive,
   );
@@ -366,7 +372,7 @@ function App() {
       try {
         const off = await providersApi.onSwitched(
           async (event: ProviderSwitchEvent) => {
-            if (event.appType === activeApp) {
+            if (event.appType === providerApp) {
               await refetch();
             }
           },
@@ -386,7 +392,7 @@ function App() {
       active = false;
       unsubscribe?.();
     };
-  }, [activeApp, refetch]);
+  }, [providerApp, refetch]);
 
   useTauriEvent("universal-provider-synced", async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
@@ -575,7 +581,7 @@ function App() {
   useEffect(() => {
     const checkEnvOnSwitch = async () => {
       try {
-        const conflicts = await checkEnvConflicts(activeApp);
+        const conflicts = await checkEnvConflicts(providerApp);
 
         if (conflicts.length > 0) {
           setEnvConflicts((prev) => {
@@ -601,7 +607,7 @@ function App() {
     };
 
     checkEnvOnSwitch();
-  }, [activeApp]);
+  }, [providerApp]);
 
   const currentViewRef = useRef(currentView);
   const managementBusy =
@@ -681,7 +687,7 @@ function App() {
     if (action === "remove") {
       // Remove from live config only (for additive mode apps like OpenCode/OpenClaw)
       // Does NOT delete from database - provider remains in the list
-      await providersApi.removeFromLiveConfig(provider.id, activeApp);
+      await providersApi.removeFromLiveConfig(provider.id, providerApp);
       // Invalidate queries to refresh the isInConfig state
       if (activeApp === "opencode") {
         await queryClient.invalidateQueries({
@@ -806,7 +812,7 @@ function App() {
 
       if (updates.length > 0) {
         try {
-          await providersApi.updateSortOrder(updates, activeApp);
+          await providersApi.updateSortOrder(updates, providerApp);
         } catch (error) {
           console.error("[App] Failed to update sort order", error);
           toast.error(
@@ -829,7 +835,7 @@ function App() {
         return;
       }
 
-      await providersApi.openTerminal(provider.id, activeApp, {
+      await providersApi.openTerminal(provider.id, providerApp, {
         cwd: selectedDir,
       });
       toast.success(
@@ -1010,7 +1016,7 @@ function App() {
                     <ProviderList
                       providers={providers}
                       currentProviderId={currentProviderId}
-                      appId={activeApp}
+                      appId={providerApp}
                       isLoading={isLoading}
                       isProxyRunning={isProxyRunning}
                       isProxyTakeover={
@@ -1044,7 +1050,9 @@ function App() {
                       onConfigureUsage={setUsageProvider}
                       onOpenWebsite={handleOpenWebsite}
                       onOpenTerminal={
-                        activeApp === "claude" ? handleOpenTerminal : undefined
+                        providerApp === "claude"
+                          ? handleOpenTerminal
+                          : undefined
                       }
                       onCreate={() => setIsAddOpen(true)}
                       onSetAsDefault={
@@ -1290,12 +1298,12 @@ function App() {
                     <ClaudeDesktopRouteToggle />
                   ) : (
                     settingsData?.enableLocalProxy && (
-                      <ProxyToggle activeApp={activeApp} />
+                      <ProxyToggle activeApp={providerApp} />
                     )
                   )}
                   {activeApp !== "claude-desktop" &&
                     settingsData?.enableFailoverToggle && (
-                      <FailoverToggle activeApp={activeApp} />
+                      <FailoverToggle activeApp={providerApp} />
                     )}
                 </div>
               )}
@@ -1305,7 +1313,7 @@ function App() {
                   className="flex shrink-0 items-center"
                   style={{ WebkitAppRegion: "no-drag" } as any}
                 >
-                  <ProfileSwitcher activeApp={activeApp} />
+                  <ProfileSwitcher activeApp={providerApp} />
                 </div>
               )}
             {/* 弹性中段：空间不足时由 AppSwitcher 自行收纳溢出应用；
@@ -1655,7 +1663,7 @@ function App() {
       <AddProviderDialog
         open={isAddOpen}
         onOpenChange={setIsAddOpen}
-        appId={activeApp}
+        appId={providerApp}
         onSubmit={addProvider}
       />
 
@@ -1668,7 +1676,7 @@ function App() {
           }
         }}
         onSubmit={handleEditProvider}
-        appId={activeApp}
+        appId={providerApp}
         isProxyTakeover={isCurrentAppTakeoverActive}
       />
 
@@ -1676,7 +1684,7 @@ function App() {
         <UsageScriptModal
           key={effectiveUsageProvider.id}
           provider={effectiveUsageProvider}
-          appId={activeApp}
+          appId={providerApp}
           isOpen={Boolean(usageProvider)}
           onClose={() => setUsageProvider(null)}
           onSave={(script) => {

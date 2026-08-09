@@ -126,6 +126,7 @@ vi.mock("@/components/AppSwitcher", () => ({
     <div data-testid="app-switcher">
       <span>{activeApp}</span>
       <button onClick={() => onSwitch("claude")}>switch-claude</button>
+      <button onClick={() => onSwitch("claude-cometix")}>switch-cometix</button>
       <button onClick={() => onSwitch("codex")}>switch-codex</button>
       <button onClick={() => onSwitch("openclaw")}>switch-openclaw</button>
     </div>
@@ -193,8 +194,29 @@ describe("App integration with MSW", () => {
     toastErrorMock.mockReset();
     skillsPanelMocks.checkUpdates.mockReset();
     skillsPanelMocks.openDiscovery.mockReset();
+    localStorage.removeItem("cc-switch-last-app");
     localStorage.removeItem("cc-switch-last-view");
   });
+
+  it("routes the Cometix UI entry through the shared Claude provider domain", async () => {
+    localStorage.setItem("cc-switch-last-app", "codex");
+    const getAllSpy = vi.spyOn(providersApi, "getAll");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() => expect(getAllSpy).toHaveBeenCalledWith("codex"));
+    fireEvent.click(screen.getByText("switch-cometix"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-switcher")).toHaveTextContent(
+        "claude-cometix",
+      );
+      expect(getAllSpy).toHaveBeenCalledWith("claude");
+    });
+
+    getAllSpy.mockRestore();
+  }, 10_000);
 
   it("covers basic provider flows via real hooks", async () => {
     const { default: App } = await import("@/App");

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { AppId } from "@/lib/api";
+import type { UiAppId } from "@/lib/api/types";
 import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import {
@@ -9,23 +9,25 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { Monitor, MoreHorizontal, Terminal } from "lucide-react";
+import { GitFork, Monitor, MoreHorizontal, Terminal } from "lucide-react";
 
 const APP_BADGE_ICON: Partial<
-  Record<AppId, { icon: typeof Terminal; offsetY?: number }>
+  Record<UiAppId, { icon: typeof Terminal; offsetY?: number }>
 > = {
   claude: { icon: Terminal },
+  "claude-cometix": { icon: GitFork },
   "claude-desktop": { icon: Monitor, offsetY: 0.5 },
 };
 
 interface AppSwitcherProps {
-  activeApp: AppId;
-  onSwitch: (app: AppId) => void;
+  activeApp: UiAppId;
+  onSwitch: (app: UiAppId) => void;
   visibleApps?: VisibleApps;
 }
 
-const ALL_APPS: AppId[] = [
+const ALL_APPS: UiAppId[] = [
   "claude",
+  "claude-cometix",
   "claude-desktop",
   "codex",
   "gemini",
@@ -36,8 +38,9 @@ const ALL_APPS: AppId[] = [
 ];
 const STORAGE_KEY = "cc-switch-last-app";
 
-const APP_ICON_NAME: Record<AppId, string> = {
+const APP_ICON_NAME: Record<UiAppId, string> = {
   claude: "claude",
+  "claude-cometix": "claude",
   "claude-desktop": "claude",
   codex: "openai",
   gemini: "gemini",
@@ -47,28 +50,33 @@ const APP_ICON_NAME: Record<AppId, string> = {
   hermes: "hermes",
 };
 
-const APP_DISPLAY_NAME: Record<AppId, string> = {
-  claude: "Claude Code",
-  "claude-desktop": "Claude Desktop",
-  codex: "Codex",
-  gemini: "Gemini",
-  grokbuild: "Grok Build",
-  opencode: "OpenCode",
-  openclaw: "OpenClaw",
-  hermes: "Hermes",
+const APP_NAME_KEY: Record<UiAppId, string> = {
+  claude: "apps.claudeCode",
+  "claude-cometix": "apps.claudeCometix",
+  "claude-desktop": "apps.claudeDesktop",
+  codex: "apps.codex",
+  gemini: "apps.gemini",
+  grokbuild: "apps.grokbuild",
+  opencode: "apps.opencode",
+  openclaw: "apps.openclaw",
+  hermes: "apps.hermes",
 };
 
-/** 应用图标 + 角标（Claude Code / Desktop 用角标区分终端与桌面） */
-function AppGlyph({ app, isActive }: { app: AppId; isActive: boolean }) {
+/** 应用图标 + 角标（Claude 系列入口用角标区分客户端） */
+function AppGlyph({
+  app,
+  isActive,
+  displayName,
+}: {
+  app: UiAppId;
+  isActive: boolean;
+  displayName: string;
+}) {
   const badgeConfig = APP_BADGE_ICON[app];
   const BadgeIcon = badgeConfig?.icon;
   return (
     <span className="relative inline-flex shrink-0">
-      <ProviderIcon
-        icon={APP_ICON_NAME[app]}
-        name={APP_DISPLAY_NAME[app]}
-        size={20}
-      />
+      <ProviderIcon icon={APP_ICON_NAME[app]} name={displayName} size={20} />
       {BadgeIcon && (
         <span
           className={cn(
@@ -103,7 +111,7 @@ export function AppSwitcher({
   const rootRef = useRef<HTMLDivElement>(null);
   const [moreOpen, setMoreOpen] = useState(false);
 
-  const handleSwitch = (app: AppId) => {
+  const handleSwitch = (app: UiAppId) => {
     if (app === activeApp) return;
     localStorage.setItem(STORAGE_KEY, app);
     onSwitch(app);
@@ -170,13 +178,14 @@ export function AppSwitcher({
     >
       {visibleList.map((app) => {
         const isActive = activeApp === app;
+        const displayName = t(APP_NAME_KEY[app]);
         return (
           <button
             key={app}
             type="button"
             onClick={() => handleSwitch(app)}
-            title={APP_DISPLAY_NAME[app]}
-            aria-label={APP_DISPLAY_NAME[app]}
+            title={displayName}
+            aria-label={displayName}
             className={cn(
               "group inline-flex items-center px-3 h-8 rounded-md text-sm font-medium transition-all duration-200",
               isActive
@@ -184,7 +193,7 @@ export function AppSwitcher({
                 : "text-muted-foreground hover:text-foreground hover:bg-background/50",
             )}
           >
-            <AppGlyph app={app} isActive={isActive} />
+            <AppGlyph app={app} isActive={isActive} displayName={displayName} />
           </button>
         );
       })}
@@ -221,8 +230,12 @@ export function AppSwitcher({
                 }}
                 className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
-                <AppGlyph app={app} isActive={false} />
-                <span className="truncate">{APP_DISPLAY_NAME[app]}</span>
+                <AppGlyph
+                  app={app}
+                  isActive={false}
+                  displayName={t(APP_NAME_KEY[app])}
+                />
+                <span className="truncate">{t(APP_NAME_KEY[app])}</span>
               </button>
             ))}
           </PopoverContent>

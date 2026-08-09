@@ -884,6 +884,7 @@
   "apps": {
     "claude": "Claude",
     "claudeCode": "Claude Code",
+    "claudeCometix": "Claude Code（Cometix）",
     "claudeDesktop": "Claude Desktop",
     "claude-desktop": "Claude Desktop",
     "codex": "Codex",

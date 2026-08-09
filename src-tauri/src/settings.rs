@@ -28,6 +28,13 @@ pub struct VisibleApps {
     #[serde(default = "default_true")]
     pub claude: bool,
     #[serde(
+        rename = "claude-cometix",
+        alias = "claudeCometix",
+        alias = "claude_cometix",
+        default = "default_true"
+    )]
+    pub claude_cometix: bool,
+    #[serde(
         rename = "claude-desktop",
         alias = "claudeDesktop",
         alias = "claude_desktop",
@@ -52,6 +59,7 @@ impl Default for VisibleApps {
     fn default() -> Self {
         Self {
             claude: true,
+            claude_cometix: true,
             claude_desktop: true,
             codex: true,
             gemini: true,
@@ -1161,6 +1169,7 @@ mod tests {
         .expect("visible apps");
 
         assert!(visible.is_visible(&AppType::ClaudeDesktop));
+        assert!(visible.claude_cometix);
     }
 
     #[test]
@@ -1177,5 +1186,16 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn visible_apps_accepts_claude_cometix_aliases() {
+        let visible: VisibleApps = serde_json::from_value(serde_json::json!({
+            "claude": true,
+            "claudeCometix": false
+        }))
+        .expect("visible apps");
+
+        assert!(!visible.claude_cometix);
     }
 }
