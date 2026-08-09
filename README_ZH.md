@@ -346,6 +346,15 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 > **注意**：首次启动可以手动导入现有 CLI 工具配置作为默认供应商。
 
+### Claude Code (Cometix)
+
+CC Switch 在“设置 → 关于 → 本地环境检查”中将
+[`@cometix/claude-code`](https://github.com/CometixSpace/claude-code) 作为独立工具项检测、安装和升级。
+它与官方 Claude Code 共享 `claude` 命令以及 `~/.claude/settings.json`，因此继续复用现有的
+Claude 供应商、MCP 和 Skills 配置，不会复制一套应用数据。
+
+> **同名命令说明**：官方包与 Cometix 包都会注册 `claude`。如果两者安装到同一个 npm 全局目录，后安装的包会接管该命令；CC Switch 会根据实际启动脚本显示当前分发版本。若要同时保留两份安装，请使用不同的 Node 版本管理器或不同的全局安装目录。
+
 ## 下载安装
 
 ### 系统要求

@@ -800,7 +800,7 @@
     "officialWebsite": "Official Website",
     "github": "GitHub",
     "manualInstallCommands": "Manual Install Commands",
-    "oneClickInstallHint": "Install or upgrade Claude Code / Codex / Gemini CLI / OpenCode / OpenClaw / Hermes",
+    "oneClickInstallHint": "Install or upgrade Claude Code / Claude Code (Cometix) / Codex / Gemini CLI / OpenCode / OpenClaw / Hermes",
     "localEnvCheck": "Local environment check",
     "updateAllTools": "Update All ({{count}})",
     "currentVersion": "Current Version",

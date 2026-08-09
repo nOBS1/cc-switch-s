@@ -111,9 +111,52 @@ pub struct ToolVersion {
     wsl_distro: Option<String>,
 }
 
-const VALID_TOOLS: [&str; 7] = [
-    "claude", "codex", "gemini", "grok", "opencode", "openclaw", "hermes",
+const VALID_TOOLS: [&str; 8] = [
+    "claude",
+    "claude-cometix",
+    "codex",
+    "gemini",
+    "grok",
+    "opencode",
+    "openclaw",
+    "hermes",
 ];
+
+const COMETIX_CLAUDE_TOOL: &str = "claude-cometix";
+const COMETIX_CLAUDE_PACKAGE: &str = "@cometix/claude-code";
+
+/// Lifecycle uses a distinct tool id for the Cometix distribution, while both
+/// distributions intentionally expose the same `claude` executable and share
+/// Claude Code's configuration files.
+fn tool_executable_name(tool: &str) -> &str {
+    match tool {
+        COMETIX_CLAUDE_TOOL => "claude",
+        _ => tool,
+    }
+}
+
+/// Build the command used by POSIX and WSL version probes. Claude's two npm
+/// distributions share a binary name, so the launcher target (or a small shim's
+/// contents) selects which virtual tool owns the result.
+fn tool_version_shell_command(tool: &str) -> String {
+    if !matches!(tool, "claude" | COMETIX_CLAUDE_TOOL) {
+        return format!("{} --version", tool_executable_name(tool));
+    }
+
+    let expected = if tool == COMETIX_CLAUDE_TOOL {
+        "cometix"
+    } else {
+        "official"
+    };
+    format!(
+        "ccs_claude_path=$(command -v claude 2>/dev/null) || exit 127; \
+ccs_claude_target=$(readlink \"$ccs_claude_path\" 2>/dev/null || true); \
+ccs_claude_dist=official; \
+case \"$ccs_claude_path:$ccs_claude_target\" in *\"/@cometix/claude-code/\"*) ccs_claude_dist=cometix ;; esac; \
+if [ \"$ccs_claude_dist\" = official ] && grep -Fq \"@cometix/claude-code\" \"$ccs_claude_path\" 2>/dev/null; then ccs_claude_dist=cometix; fi; \
+[ \"$ccs_claude_dist\" = {expected} ] || exit 127; claude --version"
+    )
+}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -427,6 +470,7 @@ fn build_tool_lifecycle_command(
 fn tool_display_name(tool: &str) -> &'static str {
     match tool {
         "claude" => "Claude Code",
+        COMETIX_CLAUDE_TOOL => "Claude Code (Cometix)",
         "codex" => "Codex",
         "gemini" => "Gemini CLI",
         "grok" => "Grok Build",
@@ -508,6 +552,7 @@ enum LifecycleCommandShell {
 fn npm_install_command_for(tool: &str) -> Option<&'static str> {
     match tool {
         "claude" => Some("npm i -g @anthropic-ai/claude-code@latest"),
+        COMETIX_CLAUDE_TOOL => Some("npm i -g @cometix/claude-code@latest"),
         "codex" => Some("npm i -g @openai/codex@latest"),
         "gemini" => Some("npm i -g @google/gemini-cli@latest"),
         "grok" => Some("npm i -g @xai-official/grok@latest"),
@@ -793,6 +838,9 @@ async fn get_single_tool_version_impl(
         "claude" => {
             fetch_npm_latest_for_tool(&client, "@anthropic-ai/claude-code", tool, local).await
         }
+        COMETIX_CLAUDE_TOOL => {
+            fetch_npm_latest_for_tool(&client, COMETIX_CLAUDE_PACKAGE, tool, local).await
+        }
         "codex" => fetch_npm_latest_for_tool(&client, "@openai/codex", tool, local).await,
         "gemini" => fetch_npm_latest_for_tool(&client, "@google/gemini-cli", tool, local).await,
         "grok" => fetch_npm_latest_for_tool(&client, "@xai-official/grok", tool, local).await,
@@ -1039,7 +1087,7 @@ fn try_get_version(tool: &str) -> ShellProbe {
         let flag = default_flag_for_shell(&shell);
         Command::new(shell)
             .arg(flag)
-            .arg(format!("{tool} --version"))
+            .arg(tool_version_shell_command(tool))
             .output()
     };
 
@@ -1234,7 +1282,9 @@ fn try_get_version_wsl(
         return ShellProbe::NotFound(format!("[WSL:{distro}] invalid distro name"));
     }
 
-    // 构建 Shell 脚本检测逻辑
+    // 构建 Shell 脚本检测逻辑。Cometix 与官方版共用 `claude` 命令，脚本内会先
+    // 检查 launcher 分发来源，再决定该虚拟工具是否拥有这个版本结果。
+    let version_command = tool_version_shell_command(tool);
     let (shell, flag, cmd) = if let Some(shell) = force_shell {
         // Defensive validation: never allow an arbitrary executable name here.
         if !is_valid_shell(shell) {
@@ -1250,17 +1300,17 @@ fn try_get_version_wsl(
             default_flag_for_shell(shell)
         };
 
-        (shell.to_string(), flag, format!("{tool} --version"))
+        (shell.to_string(), flag, version_command.clone())
     } else {
         let cmd = if let Some(flag) = force_shell_flag {
             if !is_valid_shell_flag(flag) {
                 return ShellProbe::NotFound(format!("[WSL:{distro}] invalid shell flag: {flag}"));
             }
-            format!("\"${{SHELL:-sh}}\" {flag} '{tool} --version'")
+            format!("\"${{SHELL:-sh}}\" {flag} '{version_command}'")
         } else {
             // 兜底：自动尝试 -lic, -lc, -c
             format!(
-                "\"${{SHELL:-sh}}\" -lic '{tool} --version' 2>/dev/null || \"${{SHELL:-sh}}\" -lc '{tool} --version' 2>/dev/null || \"${{SHELL:-sh}}\" -c '{tool} --version'"
+                "\"${{SHELL:-sh}}\" -lic '{version_command}' 2>/dev/null || \"${{SHELL:-sh}}\" -lc '{version_command}' 2>/dev/null || \"${{SHELL:-sh}}\" -c '{version_command}'"
             )
         };
 
@@ -1502,12 +1552,13 @@ fn grok_extra_search_paths(
 }
 
 fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf> {
+    let executable = tool_executable_name(tool);
     #[cfg(target_os = "windows")]
     {
-        let extensionless = dir.join(tool);
+        let extensionless = dir.join(executable);
         let mut candidates = vec![
-            dir.join(format!("{tool}.cmd")),
-            dir.join(format!("{tool}.exe")),
+            dir.join(format!("{executable}.cmd")),
+            dir.join(format!("{executable}.exe")),
         ];
         if windows_runnable_sibling_for_extensionless_tool(&extensionless).is_none() {
             candidates.push(extensionless);
@@ -1517,7 +1568,7 @@ fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf>
 
     #[cfg(not(target_os = "windows"))]
     {
-        vec![dir.join(tool)]
+        vec![dir.join(executable)]
     }
 }
 
@@ -1748,6 +1799,49 @@ fn run_windows_tool_version_command(
     run_windows_tool_command(tool_path, &["--version"], new_path)
 }
 
+fn path_mentions_cometix_claude(path: &Path) -> bool {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
+        .contains(COMETIX_CLAUDE_PACKAGE)
+}
+
+fn small_launcher_mentions_cometix_claude(path: &Path) -> bool {
+    const MAX_LAUNCHER_BYTES: u64 = 64 * 1024;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() > MAX_LAUNCHER_BYTES {
+        return false;
+    }
+    std::fs::read_to_string(path)
+        .map(|contents| {
+            contents
+                .replace('\\', "/")
+                .to_ascii_lowercase()
+                .contains(COMETIX_CLAUDE_PACKAGE)
+        })
+        .unwrap_or(false)
+}
+
+/// Decide whether an executable belongs to the requested virtual tool. The
+/// official and Cometix Claude distributions share `claude`, so their npm
+/// target path (POSIX symlink) or launcher contents (Windows npm shim) must be
+/// inspected. All unrelated tools retain their existing matching behavior.
+fn tool_installation_matches(tool: &str, launcher: &Path, real: &Path) -> bool {
+    if !matches!(tool, "claude" | COMETIX_CLAUDE_TOOL) {
+        return true;
+    }
+    let is_cometix = path_mentions_cometix_claude(real)
+        || path_mentions_cometix_claude(launcher)
+        || small_launcher_mentions_cometix_claude(launcher);
+    if tool == COMETIX_CLAUDE_TOOL {
+        is_cometix
+    } else {
+        !is_cometix
+    }
+}
+
 /// 扫描常见路径查找 CLI（PATH 主命令未命中时的兜底单探）。
 fn scan_cli_version(tool: &str) -> ShellProbe {
     #[cfg(not(target_os = "windows"))]
@@ -1772,6 +1866,10 @@ fn scan_cli_version(tool: &str) -> ShellProbe {
 
         for tool_path in tool_executable_candidates(tool, path) {
             if !tool_path.exists() {
+                continue;
+            }
+            let real = std::fs::canonicalize(&tool_path).unwrap_or_else(|_| tool_path.clone());
+            if !tool_installation_matches(tool, &tool_path, &real) {
                 continue;
             }
 
@@ -1963,9 +2061,10 @@ fn resolve_path_default(
         .filter(|s| is_valid_shell(s))
         .unwrap_or_else(|| "sh".to_string());
     let flag = default_flag_for_shell(&shell);
+    let executable = tool_executable_name(tool);
     let mut cmd = Command::new(shell);
     cmd.arg(flag)
-        .arg(format!("command -v {tool}"))
+        .arg(format!("command -v {executable}"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     isolate_child_process_group(&mut cmd);
@@ -1993,8 +2092,9 @@ fn resolve_path_default(
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    let executable = tool_executable_name(tool);
     let child = Command::new("cmd")
-        .args(["/C", &format!("where {tool}")])
+        .args(["/C", &format!("where {executable}")])
         .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2046,6 +2146,9 @@ fn enumerate_tool_installations(tool: &str) -> Vec<ToolInstallation> {
             // canonicalize 解析软链后去重：/opt/homebrew/bin/x → Cellar/...、nvm shim 等
             // 多个入口可能指向同一真实文件，只算一处安装。
             let real = std::fs::canonicalize(&tool_path).unwrap_or_else(|_| tool_path.clone());
+            if !tool_installation_matches(tool, &tool_path, &real) {
+                continue;
+            }
             if !seen.insert(real.clone()) {
                 continue;
             }
@@ -2108,6 +2211,7 @@ fn enumerate_tool_installations(tool: &str) -> Vec<ToolInstallation> {
 fn npm_package_for(tool: &str) -> Option<&'static str> {
     match tool {
         "claude" => Some("@anthropic-ai/claude-code"),
+        COMETIX_CLAUDE_TOOL => Some(COMETIX_CLAUDE_PACKAGE),
         "codex" => Some("@openai/codex"),
         "gemini" => Some("@google/gemini-cli"),
         "grok" => Some("@xai-official/grok"),
@@ -3286,7 +3390,7 @@ pub async fn probe_tool_installations(
 #[cfg(target_os = "windows")]
 fn wsl_distro_for_tool(tool: &str) -> Option<String> {
     let override_dir = match tool {
-        "claude" => crate::settings::get_claude_override_dir(),
+        "claude" | COMETIX_CLAUDE_TOOL => crate::settings::get_claude_override_dir(),
         "codex" => crate::settings::get_codex_override_dir(),
         "gemini" => crate::settings::get_gemini_override_dir(),
         "grok" => crate::settings::get_grok_override_dir(),
@@ -4465,6 +4569,130 @@ mod tests {
             .as_deref(),
             Some("npm i -g @xai-official/grok@latest")
         );
+    }
+
+    #[test]
+    fn cometix_claude_lifecycle_metadata_is_additive() {
+        let requested = vec![
+            "claude".to_string(),
+            "claude-cometix".to_string(),
+            "unsupported".to_string(),
+        ];
+        assert_eq!(
+            normalize_requested_tools(&requested),
+            vec!["claude", "claude-cometix"]
+        );
+        assert_eq!(tool_executable_name("claude-cometix"), "claude");
+        assert_eq!(tool_display_name("claude"), "Claude Code");
+        assert_eq!(tool_display_name("claude-cometix"), "Claude Code (Cometix)");
+        assert_eq!(npm_package_for("claude"), Some("@anthropic-ai/claude-code"));
+        assert_eq!(
+            npm_package_for("claude-cometix"),
+            Some("@cometix/claude-code")
+        );
+        assert_eq!(
+            npm_install_command_for("claude-cometix"),
+            Some("npm i -g @cometix/claude-code@latest")
+        );
+        assert_eq!(official_update_args("claude-cometix"), None);
+        assert_eq!(
+            tool_action_shell_command_for_shell(
+                "claude-cometix",
+                ToolLifecycleAction::Install,
+                LifecycleCommandShell::Posix,
+            )
+            .as_deref(),
+            Some("npm i -g @cometix/claude-code@latest")
+        );
+        assert_eq!(
+            tool_action_shell_command_for_shell(
+                "claude-cometix",
+                ToolLifecycleAction::Update,
+                LifecycleCommandShell::Posix,
+            )
+            .as_deref(),
+            Some("npm i -g @cometix/claude-code@latest")
+        );
+    }
+
+    #[test]
+    fn claude_distributions_match_distinct_installations() {
+        let cometix_real = Path::new(
+            "/home/me/.nvm/versions/node/v22/lib/node_modules/@cometix/claude-code/cli.js",
+        );
+        let official_real = Path::new(
+            "/home/me/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+        );
+        let launcher = Path::new("/home/me/.nvm/versions/node/v22/bin/claude");
+
+        assert!(tool_installation_matches(
+            "claude-cometix",
+            launcher,
+            cometix_real
+        ));
+        assert!(!tool_installation_matches("claude", launcher, cometix_real));
+        assert!(tool_installation_matches("claude", launcher, official_real));
+        assert!(!tool_installation_matches(
+            "claude-cometix",
+            launcher,
+            official_real
+        ));
+        assert!(tool_installation_matches(
+            "codex",
+            Path::new("/usr/local/bin/codex"),
+            Path::new("/usr/local/bin/codex")
+        ));
+    }
+
+    #[test]
+    fn cometix_windows_npm_launcher_is_detected_from_contents() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let launcher = temp.path().join("claude.cmd");
+        std::fs::write(
+            &launcher,
+            r#"@\"%~dp0\node.exe\" \"%~dp0\node_modules\@cometix\claude-code\cli.js\" %*"#,
+        )
+        .expect("launcher fixture should be written");
+
+        assert!(tool_installation_matches(
+            "claude-cometix",
+            &launcher,
+            &launcher
+        ));
+        assert!(!tool_installation_matches("claude", &launcher, &launcher));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cometix_windows_upgrade_stays_on_cometix_package() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let launcher = temp.path().join("claude.cmd");
+        let npm = temp.path().join("npm.cmd");
+        std::fs::write(&launcher, "@echo off\r\n").expect("launcher fixture should be written");
+        std::fs::write(&npm, "@echo off\r\n").expect("npm fixture should be written");
+
+        let command = anchored_command_from_paths(
+            "claude-cometix",
+            &launcher.to_string_lossy(),
+            &launcher.to_string_lossy(),
+        )
+        .expect("Cometix install should anchor to sibling npm");
+        assert!(command.contains("@cometix/claude-code@latest"));
+        assert!(!command.contains("@anthropic-ai/claude-code"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn cometix_posix_upgrade_stays_on_cometix_package() {
+        let command = anchored_command_from_paths(
+            "claude-cometix",
+            "/home/me/.nvm/versions/node/v22/bin/claude",
+            "/home/me/.nvm/versions/node/v22/lib/node_modules/@cometix/claude-code/cli.js",
+        )
+        .expect("Cometix install should anchor to sibling npm");
+        assert!(command.contains("@cometix/claude-code@latest"));
+        assert!(!command.contains("@anthropic-ai/claude-code"));
+        assert!(!command.contains("claude update"));
     }
 
     #[test]
