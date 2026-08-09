@@ -6,6 +6,7 @@ import zh from "@/i18n/locales/zh.json";
 
 const requiredKeys = [
   "manualInstallCommands",
+  "toolClaudeCometix",
   "updateAllTools",
   "currentVersion",
   "latestVersion",

@@ -70,6 +70,7 @@ const TOOL_NAMES = [
   "hermes",
 ] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
+type OriginalToolName = Exclude<ToolName, "claude-cometix">;
 type ToolLifecycleAction = "install" | "update";
 
 type WslShellPreference = {
@@ -128,8 +129,6 @@ const HERMES_WINDOWS_INSTALL_COMMAND = `powershell -NoProfile -ExecutionPolicy B
 
 const POSIX_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
 ${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthropic-ai/claude-code@latest
-# Claude Code (Cometix)
-npm i -g @cometix/claude-code@latest
 # Codex
 npm i -g @openai/codex@latest
 # Gemini CLI
@@ -145,8 +144,6 @@ ${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/herm
 
 const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
 npm i -g @anthropic-ai/claude-code@latest
-# Claude Code (Cometix)
-npm i -g @cometix/claude-code@latest
 # Codex
 npm i -g @openai/codex@latest
 # Gemini CLI
@@ -164,9 +161,8 @@ const ONE_CLICK_INSTALL_COMMANDS = isWindows()
   ? WINDOWS_ONE_CLICK_INSTALL_COMMANDS
   : POSIX_ONE_CLICK_INSTALL_COMMANDS;
 
-const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
+const TOOL_DISPLAY_NAMES: Record<OriginalToolName, string> = {
   claude: "Claude Code",
-  "claude-cometix": "Claude Code (Cometix)",
   codex: "Codex",
   gemini: "Gemini CLI",
   grok: "Grok Build",
@@ -174,12 +170,6 @@ const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
   openclaw: "OpenClaw",
   hermes: "Hermes",
 };
-
-// 后端返回的 tool 是 string；这里收敛唯一的 ToolName 断言与兜底，供升级确认
-// 对话框按工具名展示（避免在 JSX 里内联 cast、且每次渲染都新建闭包）。
-function toolDisplayName(tool: string): string {
-  return TOOL_DISPLAY_NAMES[tool as ToolName] ?? tool;
-}
 
 const TOOL_APP_IDS: Record<ToolName, AppId> = {
   claude: "claude",
@@ -222,6 +212,13 @@ function mergeToolVersions(
 export function AboutSection({ isPortable }: AboutSectionProps) {
   // ... (use hooks as before) ...
   const { t } = useTranslation();
+  const getToolDisplayName = useCallback(
+    (tool: string) =>
+      tool === "claude-cometix"
+        ? t("settings.toolClaudeCometix")
+        : (TOOL_DISPLAY_NAMES[tool as OriginalToolName] ?? tool),
+    [t],
+  );
   // 惰性初始化自模块缓存：重挂时首帧即渲染上次的值，避免 loading 闪烁；首次挂载缓存
   // 为空则回退到原始初值（null / loading）。
   const [version, setVersion] = useState<string | null>(() => appVersionCache);
@@ -695,7 +692,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       const failureDescription = isBatch
         ? failures
             .map(
-              (f) => `${TOOL_DISPLAY_NAMES[f.toolName]}: ${lastLine(f.detail)}`,
+              (f) => `${getToolDisplayName(f.toolName)}: ${lastLine(f.detail)}`,
             )
             .join("\n")
         : failures[0]?.detail;
@@ -740,6 +737,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       toolVersionByName,
       refreshToolVersions,
       diagnoseToolSilently,
+      getToolDisplayName,
     ],
   );
 
@@ -1016,7 +1014,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           {TOOL_NAMES.map((toolName, index) => {
             const tool = toolVersionByName.get(toolName);
             const appConfig = APP_ICON_MAP[TOOL_APP_IDS[toolName]];
-            const displayName = TOOL_DISPLAY_NAMES[toolName];
+            const displayName = getToolDisplayName(toolName);
             // 单卡片 loading 用「结果是否已到」而非「整批是否结束」驱动，实现渐进式刷新：
             //   - loadingTools[t]：本工具探测在途（首次加载或单工具刷新）；
             //   - isLoadingTools && !has(t)：整批进行中且该工具尚未返回——覆盖首帧/刷新时
@@ -1270,7 +1268,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       <ToolUpgradeConfirmDialog
         isOpen={pendingUpgrade !== null}
         plans={pendingUpgrade?.plans ?? []}
-        displayName={toolDisplayName}
+        displayName={getToolDisplayName}
         onConfirm={handleConfirmUpgrade}
         onCancel={handleCancelUpgrade}
       />

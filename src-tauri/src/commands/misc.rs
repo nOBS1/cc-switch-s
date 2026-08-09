@@ -148,14 +148,21 @@ fn tool_version_shell_command(tool: &str) -> String {
     } else {
         "official"
     };
-    format!(
+    let script = format!(
         "ccs_claude_path=$(command -v claude 2>/dev/null) || exit 127; \
 ccs_claude_target=$(readlink \"$ccs_claude_path\" 2>/dev/null || true); \
 ccs_claude_dist=official; \
+ccs_claude_dir=${{ccs_claude_path%/*}}; \
+if [ -x \"$ccs_claude_dir/volta\" ]; then \
+  ccs_claude_dist=unknown; \
+  ccs_claude_target=$(\"$ccs_claude_dir/volta\" which claude 2>/dev/null || true); \
+  if [ -n \"$ccs_claude_target\" ]; then ccs_claude_dist=official; fi; \
+fi; \
 case \"$ccs_claude_path:$ccs_claude_target\" in *\"/@cometix/claude-code/\"*) ccs_claude_dist=cometix ;; esac; \
 if [ \"$ccs_claude_dist\" = official ] && grep -Fq \"@cometix/claude-code\" \"$ccs_claude_path\" 2>/dev/null; then ccs_claude_dist=cometix; fi; \
 [ \"$ccs_claude_dist\" = {expected} ] || exit 127; claude --version"
-    )
+    );
+    format!("sh -c {}", shell_single_quote(&script))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1285,6 +1292,7 @@ fn try_get_version_wsl(
     // 构建 Shell 脚本检测逻辑。Cometix 与官方版共用 `claude` 命令，脚本内会先
     // 检查 launcher 分发来源，再决定该虚拟工具是否拥有这个版本结果。
     let version_command = tool_version_shell_command(tool);
+    let quoted_version_command = shell_single_quote(&version_command);
     let (shell, flag, cmd) = if let Some(shell) = force_shell {
         // Defensive validation: never allow an arbitrary executable name here.
         if !is_valid_shell(shell) {
@@ -1306,11 +1314,11 @@ fn try_get_version_wsl(
             if !is_valid_shell_flag(flag) {
                 return ShellProbe::NotFound(format!("[WSL:{distro}] invalid shell flag: {flag}"));
             }
-            format!("\"${{SHELL:-sh}}\" {flag} '{version_command}'")
+            format!("\"${{SHELL:-sh}}\" {flag} {quoted_version_command}")
         } else {
             // 兜底：自动尝试 -lic, -lc, -c
             format!(
-                "\"${{SHELL:-sh}}\" -lic '{version_command}' 2>/dev/null || \"${{SHELL:-sh}}\" -lc '{version_command}' 2>/dev/null || \"${{SHELL:-sh}}\" -c '{version_command}'"
+                "\"${{SHELL:-sh}}\" -lic {quoted_version_command} 2>/dev/null || \"${{SHELL:-sh}}\" -lc {quoted_version_command} 2>/dev/null || \"${{SHELL:-sh}}\" -c {quoted_version_command}"
             )
         };
 
@@ -1824,6 +1832,70 @@ fn small_launcher_mentions_cometix_claude(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeDistribution {
+    Official,
+    Cometix,
+}
+
+/// Classify the two packages that expose the same `claude` binary. Volta's
+/// native shim does not embed the npm package name, so callers must pass the
+/// unwrapped target returned by `volta which claude`. A Volta shim that cannot
+/// be unwrapped stays unknown instead of being incorrectly claimed by the
+/// official Claude card.
+fn classify_claude_installation(
+    launcher: &Path,
+    real: &Path,
+    is_volta: bool,
+    volta_target: Option<&Path>,
+) -> Option<ClaudeDistribution> {
+    let mentions_cometix = path_mentions_cometix_claude(real)
+        || path_mentions_cometix_claude(launcher)
+        || small_launcher_mentions_cometix_claude(launcher)
+        || volta_target.is_some_and(path_mentions_cometix_claude);
+    if mentions_cometix {
+        return Some(ClaudeDistribution::Cometix);
+    }
+    if is_volta && volta_target.is_none() {
+        return None;
+    }
+    Some(ClaudeDistribution::Official)
+}
+
+fn volta_binary_for_launcher(launcher: &Path) -> Option<std::path::PathBuf> {
+    let parent = launcher.parent()?;
+
+    #[cfg(target_os = "windows")]
+    let candidates = [parent.join("volta.exe")];
+
+    #[cfg(not(target_os = "windows"))]
+    let candidates = [parent.join("volta")];
+
+    candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+fn resolve_volta_claude_target(volta: &Path) -> Option<std::path::PathBuf> {
+    use std::process::Command;
+
+    let mut command = Command::new(volta);
+    command.args(["which", "claude"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = decode_command_output(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 /// Decide whether an executable belongs to the requested virtual tool. The
 /// official and Cometix Claude distributions share `claude`, so their npm
 /// target path (POSIX symlink) or launcher contents (Windows npm shim) must be
@@ -1832,14 +1904,21 @@ fn tool_installation_matches(tool: &str, launcher: &Path, real: &Path) -> bool {
     if !matches!(tool, "claude" | COMETIX_CLAUDE_TOOL) {
         return true;
     }
-    let is_cometix = path_mentions_cometix_claude(real)
-        || path_mentions_cometix_claude(launcher)
-        || small_launcher_mentions_cometix_claude(launcher);
-    if tool == COMETIX_CLAUDE_TOOL {
-        is_cometix
-    } else {
-        !is_cometix
-    }
+    let volta_binary =
+        volta_binary_for_launcher(launcher).or_else(|| volta_binary_for_launcher(real));
+    let is_volta = infer_install_source(launcher) == "volta"
+        || infer_install_source(real) == "volta"
+        || volta_binary.is_some();
+    let volta_target = volta_binary
+        .as_deref()
+        .and_then(resolve_volta_claude_target);
+    let distribution =
+        classify_claude_installation(launcher, real, is_volta, volta_target.as_deref());
+    matches!(
+        (tool, distribution),
+        (COMETIX_CLAUDE_TOOL, Some(ClaudeDistribution::Cometix))
+            | ("claude", Some(ClaudeDistribution::Official))
+    )
 }
 
 /// 扫描常见路径查找 CLI（PATH 主命令未命中时的兜底单探）。
@@ -4642,6 +4721,39 @@ mod tests {
             Path::new("/usr/local/bin/codex"),
             Path::new("/usr/local/bin/codex")
         ));
+    }
+
+    #[test]
+    fn volta_claude_distribution_uses_unwrapped_target() {
+        let launcher = Path::new("/home/me/.volta/bin/claude");
+        let cometix_target = Path::new(
+            "/home/me/.volta/tools/image/packages/@cometix/claude-code/lib/node_modules/@cometix/claude-code/cli.js",
+        );
+        let official_target = Path::new(
+            "/home/me/.volta/tools/image/packages/@anthropic-ai/claude-code/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+        );
+
+        assert_eq!(
+            classify_claude_installation(launcher, launcher, true, Some(cometix_target)),
+            Some(ClaudeDistribution::Cometix)
+        );
+        assert_eq!(
+            classify_claude_installation(launcher, launcher, true, Some(official_target)),
+            Some(ClaudeDistribution::Official)
+        );
+        assert_eq!(
+            classify_claude_installation(launcher, launcher, true, None),
+            None,
+            "an unresolved Volta shim must not be misreported as official Claude",
+        );
+    }
+
+    #[test]
+    fn claude_shell_probe_unwraps_volta_shims() {
+        let command = tool_version_shell_command("claude-cometix");
+        assert!(command.starts_with("sh -c "));
+        assert!(command.contains("volta\" which claude"));
+        assert!(command.contains("ccs_claude_dist=unknown"));
     }
 
     #[test]
