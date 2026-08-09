@@ -38,7 +38,6 @@ import {
   type AppId,
   type ProviderSwitchEvent,
 } from "@/lib/api";
-import { toBackendAppId, type UiAppId } from "@/lib/api/types";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
@@ -126,7 +125,7 @@ const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
 
 const STORAGE_KEY = "cc-switch-last-app";
-const VALID_APPS: UiAppId[] = [
+const VALID_APPS: AppId[] = [
   "claude",
   "claude-cometix",
   "claude-desktop",
@@ -138,8 +137,8 @@ const VALID_APPS: UiAppId[] = [
   "hermes",
 ];
 
-const getInitialApp = (): UiAppId => {
-  const saved = localStorage.getItem(STORAGE_KEY) as UiAppId | null;
+const getInitialApp = (): AppId => {
+  const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
   if (saved && VALID_APPS.includes(saved)) {
     return saved;
   }
@@ -176,8 +175,8 @@ function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const [activeApp, setActiveApp] = useState<UiAppId>(getInitialApp);
-  const providerApp: AppId = toBackendAppId(activeApp);
+  const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
+  const providerApp = activeApp;
   const sharedFeatureApp: AppId =
     activeApp === "claude-desktop" ? "claude" : providerApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
@@ -219,7 +218,7 @@ function App() {
     ...settingsData?.visibleApps,
   };
 
-  const getFirstVisibleApp = (): UiAppId => {
+  const getFirstVisibleApp = (): AppId => {
     if (visibleApps.claude) return "claude";
     if (visibleApps["claude-cometix"]) return "claude-cometix";
     if (visibleApps["claude-desktop"]) return "claude-desktop";
@@ -1050,7 +1049,8 @@ function App() {
                       onConfigureUsage={setUsageProvider}
                       onOpenWebsite={handleOpenWebsite}
                       onOpenTerminal={
-                        providerApp === "claude"
+                        providerApp === "claude" ||
+                        providerApp === "claude-cometix"
                           ? handleOpenTerminal
                           : undefined
                       }
@@ -1297,17 +1297,20 @@ function App() {
                   {activeApp === "claude-desktop" ? (
                     <ClaudeDesktopRouteToggle />
                   ) : (
+                    activeApp !== "claude-cometix" &&
                     settingsData?.enableLocalProxy && (
                       <ProxyToggle activeApp={providerApp} />
                     )
                   )}
                   {activeApp !== "claude-desktop" &&
+                    activeApp !== "claude-cometix" &&
                     settingsData?.enableFailoverToggle && (
                       <FailoverToggle activeApp={providerApp} />
                     )}
                 </div>
               )}
             {currentView === "providers" &&
+              activeApp !== "claude-cometix" &&
               (settingsData?.showProfileSwitcher ?? true) && (
                 <div
                   className="flex shrink-0 items-center"

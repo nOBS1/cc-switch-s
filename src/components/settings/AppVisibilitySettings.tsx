@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import type { VisibleApps } from "@/types";
-import type { UiAppId } from "@/lib/api/types";
+import type { AppId } from "@/lib/api/types";
 
 interface AppVisibilitySettingsProps {
   settings: SettingsFormState;
@@ -14,7 +14,7 @@ interface AppVisibilitySettingsProps {
 }
 
 const APP_CONFIG: Array<{
-  id: UiAppId;
+  id: AppId;
   icon: string;
   nameKey: string;
 }> = [
@@ -59,7 +59,7 @@ export function AppVisibilitySettings({
   // Count how many apps are currently visible
   const visibleCount = Object.values(visibleApps).filter(Boolean).length;
 
-  const handleToggle = (appId: UiAppId) => {
+  const handleToggle = (appId: AppId) => {
     const isCurrentlyVisible = visibleApps[appId];
     // Prevent disabling the last visible app
     if (isCurrentlyVisible && visibleCount <= 1) return;

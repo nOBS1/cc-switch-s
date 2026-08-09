@@ -9,6 +9,13 @@ use crate::services::skill::SkillStore;
 pub struct McpApps {
     #[serde(default)]
     pub claude: bool,
+    #[serde(
+        rename = "claude-cometix",
+        alias = "claudeCometix",
+        alias = "claude_cometix",
+        default
+    )]
+    pub claude_cometix: bool,
     #[serde(default)]
     pub codex: bool,
     #[serde(default)]
@@ -26,6 +33,7 @@ impl McpApps {
     pub fn is_enabled_for(&self, app: &AppType) -> bool {
         match app {
             AppType::Claude => self.claude,
+            AppType::ClaudeCometix => self.claude_cometix,
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::GrokBuild => self.grokbuild,
@@ -40,6 +48,7 @@ impl McpApps {
     pub fn set_enabled_for(&mut self, app: &AppType, enabled: bool) {
         match app {
             AppType::Claude => self.claude = enabled,
+            AppType::ClaudeCometix => self.claude_cometix = enabled,
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::GrokBuild => self.grokbuild = enabled,
@@ -55,6 +64,9 @@ impl McpApps {
         let mut apps = Vec::new();
         if self.claude {
             apps.push(AppType::Claude);
+        }
+        if self.claude_cometix {
+            apps.push(AppType::ClaudeCometix);
         }
         if self.codex {
             apps.push(AppType::Codex);
@@ -77,6 +89,7 @@ impl McpApps {
     /// 检查是否所有应用都未启用
     pub fn is_empty(&self) -> bool {
         !self.claude
+            && !self.claude_cometix
             && !self.codex
             && !self.gemini
             && !self.grokbuild
@@ -90,6 +103,13 @@ impl McpApps {
 pub struct SkillApps {
     #[serde(default)]
     pub claude: bool,
+    #[serde(
+        rename = "claude-cometix",
+        alias = "claudeCometix",
+        alias = "claude_cometix",
+        default
+    )]
+    pub claude_cometix: bool,
     #[serde(default)]
     pub codex: bool,
     #[serde(default)]
@@ -107,6 +127,7 @@ impl SkillApps {
     pub fn is_enabled_for(&self, app: &AppType) -> bool {
         match app {
             AppType::Claude => self.claude,
+            AppType::ClaudeCometix => self.claude_cometix,
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::GrokBuild => self.grokbuild,
@@ -121,6 +142,7 @@ impl SkillApps {
     pub fn set_enabled_for(&mut self, app: &AppType, enabled: bool) {
         match app {
             AppType::Claude => self.claude = enabled,
+            AppType::ClaudeCometix => self.claude_cometix = enabled,
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::GrokBuild => self.grokbuild = enabled,
@@ -136,6 +158,9 @@ impl SkillApps {
         let mut apps = Vec::new();
         if self.claude {
             apps.push(AppType::Claude);
+        }
+        if self.claude_cometix {
+            apps.push(AppType::ClaudeCometix);
         }
         if self.codex {
             apps.push(AppType::Codex);
@@ -158,6 +183,7 @@ impl SkillApps {
     /// 检查是否所有应用都未启用
     pub fn is_empty(&self) -> bool {
         !self.claude
+            && !self.claude_cometix
             && !self.codex
             && !self.gemini
             && !self.grokbuild
@@ -284,6 +310,14 @@ pub struct McpRoot {
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub claude: McpConfig,
     #[serde(
+        rename = "claude-cometix",
+        alias = "claudeCometix",
+        alias = "claude_cometix",
+        default,
+        skip_serializing_if = "McpConfig::is_empty"
+    )]
+    pub claude_cometix: McpConfig,
+    #[serde(
         rename = "claude-desktop",
         alias = "claudeDesktop",
         alias = "claude_desktop",
@@ -315,6 +349,7 @@ impl Default for McpRoot {
             servers: Some(HashMap::new()),
             // 旧结构保持空，仅用于反序列化旧配置时的迁移
             claude: McpConfig::default(),
+            claude_cometix: McpConfig::default(),
             claude_desktop: McpConfig::default(),
             codex: McpConfig::default(),
             gemini: McpConfig::default(),
@@ -338,6 +373,13 @@ pub struct PromptConfig {
 pub struct PromptRoot {
     #[serde(default)]
     pub claude: PromptConfig,
+    #[serde(
+        rename = "claude-cometix",
+        alias = "claudeCometix",
+        alias = "claude_cometix",
+        default
+    )]
+    pub claude_cometix: PromptConfig,
     #[serde(
         rename = "claude-desktop",
         alias = "claudeDesktop",
@@ -370,6 +412,12 @@ use crate::provider::ProviderManager;
 pub enum AppType {
     Claude,
     #[serde(
+        rename = "claude-cometix",
+        alias = "claude_cometix",
+        alias = "claudeCometix"
+    )]
+    ClaudeCometix,
+    #[serde(
         rename = "claude-desktop",
         alias = "claude_desktop",
         alias = "claudeDesktop"
@@ -387,6 +435,7 @@ impl AppType {
     pub fn as_str(&self) -> &str {
         match self {
             AppType::Claude => "claude",
+            AppType::ClaudeCometix => "claude-cometix",
             AppType::ClaudeDesktop => "claude-desktop",
             AppType::Codex => "codex",
             AppType::Gemini => "gemini",
@@ -412,6 +461,7 @@ impl AppType {
     pub fn all() -> impl Iterator<Item = AppType> {
         [
             AppType::Claude,
+            AppType::ClaudeCometix,
             AppType::ClaudeDesktop,
             AppType::Codex,
             AppType::Gemini,
@@ -431,6 +481,9 @@ impl FromStr for AppType {
         let normalized = s.trim().to_lowercase();
         match normalized.as_str() {
             "claude" => Ok(AppType::Claude),
+            "claude-cometix" | "claude_cometix" | "claudecometix" => {
+                Ok(AppType::ClaudeCometix)
+            }
             "claude-desktop" | "claude_desktop" | "claudedesktop" => Ok(AppType::ClaudeDesktop),
             "codex" => Ok(AppType::Codex),
             "gemini" => Ok(AppType::Gemini),
@@ -440,8 +493,8 @@ impl FromStr for AppType {
             "hermes" => Ok(AppType::Hermes),
             other => Err(AppError::localized(
                 "unsupported_app",
-                format!("不支持的应用标识: '{other}'。可选值: claude, claude-desktop, codex, gemini, grokbuild, opencode, openclaw, hermes。"),
-                format!("Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, gemini, grokbuild, opencode, openclaw, hermes."),
+                format!("不支持的应用标识: '{other}'。可选值: claude, claude-cometix, claude-desktop, codex, gemini, grokbuild, opencode, openclaw, hermes。"),
+                format!("Unsupported app id: '{other}'. Allowed: claude, claude-cometix, claude-desktop, codex, gemini, grokbuild, opencode, openclaw, hermes."),
             )),
         }
     }
@@ -452,6 +505,15 @@ impl FromStr for AppType {
 pub struct CommonConfigSnippets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude: Option<String>,
+
+    #[serde(
+        rename = "claude-cometix",
+        alias = "claudeCometix",
+        alias = "claude_cometix",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub claude_cometix: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex: Option<String>,
@@ -474,6 +536,7 @@ impl CommonConfigSnippets {
     pub fn get(&self, app: &AppType) -> Option<&String> {
         match app {
             AppType::Claude => self.claude.as_ref(),
+            AppType::ClaudeCometix => self.claude_cometix.as_ref(),
             AppType::ClaudeDesktop => None,
             AppType::Codex => self.codex.as_ref(),
             AppType::Gemini => self.gemini.as_ref(),
@@ -488,6 +551,7 @@ impl CommonConfigSnippets {
     pub fn set(&mut self, app: &AppType, snippet: Option<String>) {
         match app {
             AppType::Claude => self.claude = snippet,
+            AppType::ClaudeCometix => self.claude_cometix = snippet,
             AppType::ClaudeDesktop => {}
             AppType::Codex => self.codex = snippet,
             AppType::Gemini => self.gemini = snippet,
@@ -532,6 +596,7 @@ impl Default for MultiAppConfig {
     fn default() -> Self {
         let mut apps = HashMap::new();
         apps.insert("claude".to_string(), ProviderManager::default());
+        apps.insert("claude-cometix".to_string(), ProviderManager::default());
         apps.insert("claude-desktop".to_string(), ProviderManager::default());
         apps.insert("codex".to_string(), ProviderManager::default());
         apps.insert("gemini".to_string(), ProviderManager::default());
@@ -627,6 +692,16 @@ impl MultiAppConfig {
             updated = true;
         }
 
+        // Cometix is a separate Claude Code configuration domain. Never seed it
+        // with the official Claude manager, otherwise subsequent writes could
+        // make the two entries appear shared.
+        if !config.apps.contains_key("claude-cometix") {
+            config
+                .apps
+                .insert("claude-cometix".to_string(), ProviderManager::default());
+            updated = true;
+        }
+
         // 执行 MCP 迁移（v3.6.x → v3.7.0）
         let migrated = config.migrate_mcp_to_unified()?;
         if migrated {
@@ -695,6 +770,7 @@ impl MultiAppConfig {
     pub fn mcp_for(&self, app: &AppType) -> &McpConfig {
         match app {
             AppType::Claude => &self.mcp.claude,
+            AppType::ClaudeCometix => &self.mcp.claude_cometix,
             AppType::ClaudeDesktop => &self.mcp.claude_desktop,
             AppType::Codex => &self.mcp.codex,
             AppType::Gemini => &self.mcp.gemini,
@@ -709,6 +785,7 @@ impl MultiAppConfig {
     pub fn mcp_for_mut(&mut self, app: &AppType) -> &mut McpConfig {
         match app {
             AppType::Claude => &mut self.mcp.claude,
+            AppType::ClaudeCometix => &mut self.mcp.claude_cometix,
             AppType::ClaudeDesktop => &mut self.mcp.claude_desktop,
             AppType::Codex => &mut self.mcp.codex,
             AppType::Gemini => &mut self.mcp.gemini,
@@ -727,6 +804,7 @@ impl MultiAppConfig {
 
         // 为每个应用尝试自动导入提示词
         Self::auto_import_prompt_if_exists(&mut config, AppType::Claude)?;
+        Self::auto_import_prompt_if_exists(&mut config, AppType::ClaudeCometix)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::Codex)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::Gemini)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::GrokBuild)?;
@@ -750,6 +828,7 @@ impl MultiAppConfig {
     fn maybe_auto_import_prompts_for_existing_config(&mut self) -> Result<bool, AppError> {
         // 如果任一应用已经有提示词配置，说明用户已经在使用 Prompt 功能，避免再次自动导入
         if !self.prompts.claude.prompts.is_empty()
+            || !self.prompts.claude_cometix.prompts.is_empty()
             || !self.prompts.claude_desktop.prompts.is_empty()
             || !self.prompts.codex.prompts.is_empty()
             || !self.prompts.gemini.prompts.is_empty()
@@ -766,6 +845,7 @@ impl MultiAppConfig {
         let mut imported = false;
         for app in [
             AppType::Claude,
+            AppType::ClaudeCometix,
             AppType::Codex,
             AppType::Gemini,
             AppType::GrokBuild,
@@ -839,6 +919,7 @@ impl MultiAppConfig {
         // 插入到对应的应用配置中
         let prompts = match app {
             AppType::Claude => &mut config.prompts.claude.prompts,
+            AppType::ClaudeCometix => &mut config.prompts.claude_cometix.prompts,
             AppType::ClaudeDesktop => &mut config.prompts.claude_desktop.prompts,
             AppType::Codex => &mut config.prompts.codex.prompts,
             AppType::Gemini => &mut config.prompts.gemini.prompts,
@@ -882,6 +963,7 @@ impl MultiAppConfig {
         ] {
             let old_servers = match app {
                 AppType::Claude => &self.mcp.claude.servers,
+                AppType::ClaudeCometix => &self.mcp.claude_cometix.servers,
                 AppType::ClaudeDesktop => continue, // Claude Desktop 3P profiles don't use MCP here
                 AppType::Codex => &self.mcp.codex.servers,
                 AppType::Gemini => &self.mcp.gemini.servers,
@@ -989,6 +1071,7 @@ impl MultiAppConfig {
 
         // 清空旧的分应用配置
         self.mcp.claude = McpConfig::default();
+        self.mcp.claude_cometix = McpConfig::default();
         self.mcp.codex = McpConfig::default();
         self.mcp.gemini = McpConfig::default();
 
@@ -1019,6 +1102,40 @@ mod tests {
             AppType::ClaudeDesktop
         );
         assert_eq!(AppType::ClaudeDesktop.as_str(), "claude-desktop");
+    }
+
+    #[test]
+    fn app_type_parses_claude_cometix_aliases() {
+        for alias in ["claude-cometix", "claude_cometix", "claudeCometix"] {
+            assert_eq!(alias.parse::<AppType>().unwrap(), AppType::ClaudeCometix);
+        }
+        assert_eq!(AppType::ClaudeCometix.as_str(), "claude-cometix");
+    }
+
+    #[test]
+    fn claude_and_cometix_defaults_are_independent() {
+        let mut config = MultiAppConfig::default();
+        config
+            .apps
+            .get_mut("claude")
+            .expect("official Claude manager")
+            .current = "official-provider".to_string();
+        config
+            .common_config_snippets
+            .set(&AppType::Claude, Some("{\"theme\":\"dark\"}".to_string()));
+
+        assert_eq!(
+            config
+                .apps
+                .get("claude-cometix")
+                .expect("Cometix manager")
+                .current,
+            ""
+        );
+        assert_eq!(
+            config.common_config_snippets.get(&AppType::ClaudeCometix),
+            None
+        );
     }
 
     struct TempHome {

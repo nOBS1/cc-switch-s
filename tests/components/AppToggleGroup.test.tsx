@@ -3,6 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import { AppToggleGroup } from "@/components/common/AppToggleGroup";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (key: string) =>
+      ({
+        "apps.claude": "Claude",
+        "apps.claudeCometix": "Claude Code (Cometix)",
+      })[key] ?? key,
+  }),
+}));
+
 describe("AppToggleGroup", () => {
   it("exposes each app state and respects the shared disabled state", () => {
     const onToggle = vi.fn();
@@ -36,5 +46,21 @@ describe("AppToggleGroup", () => {
     expect(disabledButton).toHaveAttribute("aria-pressed", "false");
     expect(disabledButton).toBeDisabled();
     expect(disabledButton.className).not.toContain("disabled:opacity-");
+  });
+
+  it("uses the translated Cometix label", () => {
+    render(
+      <TooltipProvider>
+        <AppToggleGroup
+          apps={{ "claude-cometix": true }}
+          appIds={["claude-cometix"]}
+          onToggle={vi.fn()}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Claude Code (Cometix)" }),
+    ).toBeInTheDocument();
   });
 });

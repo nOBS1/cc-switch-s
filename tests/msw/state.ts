@@ -35,6 +35,7 @@ const createDefaultProviders = (): ProvidersByApp => ({
       createdAt: Date.now() + 1,
     },
   },
+  "claude-cometix": {},
   "claude-desktop": {},
   codex: {
     "codex-1": {
@@ -77,6 +78,7 @@ const createDefaultProviders = (): ProvidersByApp => ({
 
 const createDefaultCurrent = (): CurrentProviderState => ({
   claude: "claude-1",
+  "claude-cometix": "",
   "claude-desktop": "",
   codex: "codex-1",
   gemini: "gemini-1",
@@ -172,6 +174,7 @@ let mcpConfigs: McpConfigState = {
       },
     },
   },
+  "claude-cometix": {},
   "claude-desktop": {},
   codex: {
     httpServer: {
@@ -241,6 +244,7 @@ export const resetProviderState = () => {
         },
       },
     },
+    "claude-cometix": {},
     "claude-desktop": {},
     codex: {
       httpServer: {

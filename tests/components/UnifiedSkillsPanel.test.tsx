@@ -12,6 +12,21 @@ import type {
   SkillUpdateInfo,
 } from "@/lib/api/skills";
 
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (key: string) =>
+      ({
+        "apps.claude": "Claude",
+        "apps.claudeCometix": "Claude Code (Cometix)",
+        "apps.codex": "Codex",
+        "apps.gemini": "Gemini",
+        "apps.grokbuild": "Grok Build",
+        "apps.opencode": "OpenCode",
+        "apps.hermes": "Hermes",
+      })[key] ?? key,
+  }),
+}));
+
 const scanUnmanagedMock = vi.fn();
 const toggleSkillAppMock = vi.fn();
 const uninstallSkillMock = vi.fn();

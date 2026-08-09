@@ -3548,12 +3548,13 @@ fn extract_env_vars_from_config(
 ) -> Vec<(String, String)> {
     let mut env_vars = Vec::new();
 
-    let Some(obj) = config.as_object() else {
-        return env_vars;
-    };
+    let obj = config.as_object();
 
     // 处理 env 字段（Claude/Gemini 通用）
-    if let Some(env) = obj.get("env").and_then(|v| v.as_object()) {
+    if let Some(env) = obj
+        .and_then(|value| value.get("env"))
+        .and_then(|value| value.as_object())
+    {
         for (key, value) in env {
             if let Some(str_val) = value.as_str() {
                 env_vars.push((key.clone(), str_val.to_string()));
@@ -3562,7 +3563,9 @@ fn extract_env_vars_from_config(
 
         // 处理 base_url: 根据应用类型添加对应的环境变量
         let base_url_key = match app_type {
-            AppType::Claude | AppType::ClaudeDesktop => Some("ANTHROPIC_BASE_URL"),
+            AppType::Claude | AppType::ClaudeCometix | AppType::ClaudeDesktop => {
+                Some("ANTHROPIC_BASE_URL")
+            }
             AppType::Gemini => Some("GOOGLE_GEMINI_BASE_URL"),
             _ => None,
         };
@@ -3576,16 +3579,34 @@ fn extract_env_vars_from_config(
 
     // Codex 使用 auth 字段转换为 OPENAI_API_KEY
     if *app_type == AppType::Codex {
-        if let Some(auth) = obj.get("auth").and_then(|v| v.as_str()) {
+        if let Some(auth) = obj
+            .and_then(|value| value.get("auth"))
+            .and_then(|value| value.as_str())
+        {
             env_vars.push(("OPENAI_API_KEY".to_string(), auth.to_string()));
         }
     }
 
     // Gemini 使用 api_key 字段转换为 GEMINI_API_KEY
     if *app_type == AppType::Gemini {
-        if let Some(api_key) = obj.get("api_key").and_then(|v| v.as_str()) {
+        if let Some(api_key) = obj
+            .and_then(|value| value.get("api_key"))
+            .and_then(|value| value.as_str())
+        {
             env_vars.push(("GEMINI_API_KEY".to_string(), api_key.to_string()));
         }
+    }
+
+    if matches!(app_type, AppType::ClaudeCometix) {
+        // This value is authoritative for the Cometix entry: provider-supplied
+        // values must not redirect it into the official Claude data directory.
+        env_vars.retain(|(key, _)| key != "CLAUDE_CONFIG_DIR");
+        env_vars.push((
+            "CLAUDE_CONFIG_DIR".to_string(),
+            crate::config::get_claude_cometix_config_dir()
+                .to_string_lossy()
+                .to_string(),
+        ));
     }
 
     env_vars
@@ -6527,6 +6548,45 @@ mod tests {
                 .expect("temp dir should be present");
 
         assert!(resolved.is_dir());
+    }
+
+    #[test]
+    fn cometix_terminal_forces_its_independent_config_dir() {
+        let config = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://example.com",
+                "CLAUDE_CONFIG_DIR": "C:/wrong/shared-dir"
+            }
+        });
+
+        let env = extract_env_vars_from_config(&config, &AppType::ClaudeCometix);
+        let config_dirs: Vec<_> = env
+            .iter()
+            .filter(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+            .collect();
+
+        assert_eq!(config_dirs.len(), 1);
+        assert_eq!(
+            config_dirs[0].1,
+            crate::config::get_claude_cometix_config_dir()
+                .to_string_lossy()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn cometix_terminal_injects_config_dir_for_empty_provider_config() {
+        let env = extract_env_vars_from_config(&serde_json::Value::Null, &AppType::ClaudeCometix);
+
+        assert_eq!(
+            env,
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                crate::config::get_claude_cometix_config_dir()
+                    .to_string_lossy()
+                    .to_string(),
+            )]
+        );
     }
 
     #[test]

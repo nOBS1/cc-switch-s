@@ -210,6 +210,7 @@ const UnifiedSkillsPanel = React.forwardRef<
   const enabledCounts = useMemo(() => {
     const counts = {
       claude: 0,
+      "claude-cometix": 0,
       "claude-desktop": 0,
       codex: 0,
       gemini: 0,

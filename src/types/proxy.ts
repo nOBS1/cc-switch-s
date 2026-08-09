@@ -43,6 +43,7 @@ export interface ProxyServerInfo {
 
 export interface ProxyTakeoverStatus {
   claude: boolean;
+  "claude-cometix"?: boolean;
   "claude-desktop"?: boolean;
   codex: boolean;
   gemini: boolean;

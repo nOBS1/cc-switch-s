@@ -60,7 +60,10 @@ export function useProviderCategory({
           preset.category || (preset.isOfficial ? "official" : undefined),
         );
       }
-    } else if (type === "claude" && appId === "claude") {
+    } else if (
+      type === "claude" &&
+      (appId === "claude" || appId === "claude-cometix")
+    ) {
       const preset = providerPresets[index];
       if (preset) {
         setCategory(

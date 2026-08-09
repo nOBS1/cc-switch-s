@@ -192,6 +192,30 @@ describe("McpFormModal", () => {
     );
   });
 
+  it("可只为 Cometix 启用 MCP，且不启用官方 Claude", async () => {
+    renderForm({ defaultEnabledApps: ["claude-cometix"] });
+
+    expect(
+      screen.getByLabelText("mcp.unifiedPanel.apps.claude"),
+    ).not.toBeChecked();
+    expect(
+      screen.getByLabelText("mcp.unifiedPanel.apps.claudeCometix"),
+    ).toBeChecked();
+
+    fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
+      target: { value: "cometix-only" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("mcp.form.jsonPlaceholder"), {
+      target: { value: '{"type":"stdio","command":"run"}' },
+    });
+    fireEvent.click(screen.getByText("common.add"));
+
+    await waitFor(() => expect(upsertMock).toHaveBeenCalledTimes(1));
+    const [entry] = upsertMock.mock.calls.at(-1) ?? [];
+    expect(entry.apps.claude).toBe(false);
+    expect(entry.apps["claude-cometix"]).toBe(true);
+  });
+
   it("提交时清洗字段并调用 upsert 与 onSave", async () => {
     const { onSave } = renderForm();
 
@@ -390,6 +414,7 @@ type = "stdio"
     expect(entry.enabled).toBe(true);
     expect(entry.apps).toEqual({
       claude: true,
+      "claude-cometix": false,
       codex: false,
       gemini: false,
       grokbuild: false,
@@ -439,6 +464,7 @@ type = "stdio"
     expect(entry.id).toBe("no-apps");
     expect(entry.apps).toEqual({
       claude: false,
+      "claude-cometix": false,
       codex: false,
       gemini: false,
       grokbuild: false,

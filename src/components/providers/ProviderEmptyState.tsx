@@ -16,7 +16,10 @@ export function ProviderEmptyState({
 }: ProviderEmptyStateProps) {
   const { t } = useTranslation();
   const showSnippetHint =
-    appId === "claude" || appId === "codex" || appId === "gemini";
+    appId === "claude" ||
+    appId === "claude-cometix" ||
+    appId === "codex" ||
+    appId === "gemini";
 
   return (
     <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border p-10 text-center">
@@ -29,7 +32,11 @@ export function ProviderEmptyState({
       </p>
       {showSnippetHint && (
         <p className="mt-1 max-w-lg text-sm text-muted-foreground">
-          {t("provider.noProvidersDescriptionSnippet")}
+          {t(
+            appId === "claude-cometix"
+              ? "provider.noProvidersDescriptionSnippetCometix"
+              : "provider.noProvidersDescriptionSnippet",
+          )}
         </p>
       )}
       <div className="mt-6 flex flex-col gap-2">

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { UiAppId } from "@/lib/api/types";
+import type { AppId } from "@/lib/api/types";
 import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import {
@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 import { GitFork, Monitor, MoreHorizontal, Terminal } from "lucide-react";
 
 const APP_BADGE_ICON: Partial<
-  Record<UiAppId, { icon: typeof Terminal; offsetY?: number }>
+  Record<AppId, { icon: typeof Terminal; offsetY?: number }>
 > = {
   claude: { icon: Terminal },
   "claude-cometix": { icon: GitFork },
@@ -20,12 +20,12 @@ const APP_BADGE_ICON: Partial<
 };
 
 interface AppSwitcherProps {
-  activeApp: UiAppId;
-  onSwitch: (app: UiAppId) => void;
+  activeApp: AppId;
+  onSwitch: (app: AppId) => void;
   visibleApps?: VisibleApps;
 }
 
-const ALL_APPS: UiAppId[] = [
+const ALL_APPS: AppId[] = [
   "claude",
   "claude-cometix",
   "claude-desktop",
@@ -38,7 +38,7 @@ const ALL_APPS: UiAppId[] = [
 ];
 const STORAGE_KEY = "cc-switch-last-app";
 
-const APP_ICON_NAME: Record<UiAppId, string> = {
+const APP_ICON_NAME: Record<AppId, string> = {
   claude: "claude",
   "claude-cometix": "claude",
   "claude-desktop": "claude",
@@ -50,7 +50,7 @@ const APP_ICON_NAME: Record<UiAppId, string> = {
   hermes: "hermes",
 };
 
-const APP_NAME_KEY: Record<UiAppId, string> = {
+const APP_NAME_KEY: Record<AppId, string> = {
   claude: "apps.claudeCode",
   "claude-cometix": "apps.claudeCometix",
   "claude-desktop": "apps.claudeDesktop",
@@ -68,7 +68,7 @@ function AppGlyph({
   isActive,
   displayName,
 }: {
-  app: UiAppId;
+  app: AppId;
   isActive: boolean;
   displayName: string;
 }) {
@@ -111,7 +111,7 @@ export function AppSwitcher({
   const rootRef = useRef<HTMLDivElement>(null);
   const [moreOpen, setMoreOpen] = useState(false);
 
-  const handleSwitch = (app: UiAppId) => {
+  const handleSwitch = (app: AppId) => {
     if (app === activeApp) return;
     localStorage.setItem(STORAGE_KEY, app);
     onSwitch(app);

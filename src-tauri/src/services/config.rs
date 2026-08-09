@@ -86,6 +86,7 @@ impl ConfigService {
     /// 同步当前供应商到对应的 live 配置。
     pub fn sync_current_providers_to_live(config: &mut MultiAppConfig) -> Result<(), AppError> {
         Self::sync_current_provider_for_app(config, &AppType::Claude)?;
+        Self::sync_current_provider_for_app(config, &AppType::ClaudeCometix)?;
         Self::sync_current_provider_for_app(config, &AppType::Codex)?;
         Self::sync_current_provider_for_app(config, &AppType::Gemini)?;
         Self::sync_current_provider_for_app(config, &AppType::GrokBuild)?;
@@ -121,7 +122,9 @@ impl ConfigService {
 
         match app_type {
             AppType::Codex => Self::sync_codex_live(config, &current_id, &provider)?,
-            AppType::Claude => Self::sync_claude_live(config, &current_id, &provider)?,
+            AppType::Claude | AppType::ClaudeCometix => {
+                Self::sync_claude_live(config, app_type, &current_id, &provider)?
+            }
             AppType::ClaudeDesktop => {
                 // Claude Desktop 3P profiles are managed by claude_desktop_config.
             }
@@ -211,12 +214,16 @@ impl ConfigService {
 
     fn sync_claude_live(
         config: &mut MultiAppConfig,
+        app_type: &AppType,
         provider_id: &str,
         provider: &Provider,
     ) -> Result<(), AppError> {
         use crate::config::{read_json_file, write_json_file};
 
-        let settings_path = crate::config::get_claude_settings_path();
+        let settings_path = match app_type {
+            AppType::ClaudeCometix => crate::config::get_claude_cometix_settings_path(),
+            _ => crate::config::get_claude_settings_path(),
+        };
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
@@ -225,7 +232,7 @@ impl ConfigService {
         write_json_file(&settings_path, &settings)?;
 
         let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
-        if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
+        if let Some(manager) = config.get_manager_mut(app_type) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
                 target.settings_config = live_after;
             }

@@ -4,8 +4,14 @@ import { AppCountBar } from "@/components/common/AppCountBar";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
-    t: (key: string, params?: { app?: string }) =>
-      params?.app ? `${key}:${params.app}` : key,
+    t: (key: string, params?: { app?: string }) => {
+      const appLabels: Record<string, string> = {
+        "apps.claude": "Claude",
+        "apps.codex": "Codex",
+      };
+      if (appLabels[key]) return appLabels[key];
+      return params?.app ? `${key}:${params.app}` : key;
+    },
   }),
 }));
 

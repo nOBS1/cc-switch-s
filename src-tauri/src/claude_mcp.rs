@@ -326,6 +326,13 @@ pub fn validate_command_in_path(cmd: &str) -> Result<bool, AppError> {
 /// 读取 ~/.claude.json 中的 mcpServers 映射
 pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>, AppError> {
     let path = user_config_path();
+    read_mcp_servers_map_at(&path)
+}
+
+/// 读取指定 Claude 配置域中的 mcpServers 映射。
+pub fn read_mcp_servers_map_at(
+    path: &Path,
+) -> Result<std::collections::HashMap<String, Value>, AppError> {
     if !path.exists() {
         return Ok(std::collections::HashMap::new());
     }
@@ -346,6 +353,14 @@ pub fn set_mcp_servers_map(
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
     let path = user_config_path();
+    set_mcp_servers_map_at(&path, servers)
+}
+
+/// 将 mcpServers 写入指定 Claude 配置域，保留该文件中的其他字段。
+pub fn set_mcp_servers_map_at(
+    path: &Path,
+    servers: &std::collections::HashMap<String, Value>,
+) -> Result<(), AppError> {
     let mut root = if path.exists() {
         read_json_value(&path)?
     } else {

@@ -4,6 +4,7 @@ import type { AppId } from "@/lib/api/types";
 
 export type AppType =
   | "claude"
+  | "claude-cometix"
   | "claude-desktop"
   | "codex"
   | "gemini"
@@ -15,6 +16,7 @@ export type AppType =
 /** Skill 应用启用状态 */
 export interface SkillApps {
   claude: boolean;
+  "claude-cometix"?: boolean;
   "claude-desktop"?: boolean;
   codex: boolean;
   gemini: boolean;

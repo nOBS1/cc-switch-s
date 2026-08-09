@@ -13,6 +13,7 @@ const DEFAULT_COMMON_CONFIG_SNIPPET = `{
 }`;
 
 interface UseCommonConfigSnippetProps {
+  appId: "claude" | "claude-cometix";
   settingsConfig: string;
   onConfigChange: (config: string) => void;
   initialData?: {
@@ -29,6 +30,7 @@ interface UseCommonConfigSnippetProps {
  * 从 config.json 读取和保存，支持从 localStorage 平滑迁移
  */
 export function useCommonConfigSnippet({
+  appId,
   settingsConfig,
   onConfigChange,
   initialData,
@@ -70,7 +72,7 @@ export function useCommonConfigSnippet({
     const loadSnippet = async () => {
       try {
         // 使用统一 API 加载
-        const snippet = await configApi.getCommonConfigSnippet("claude");
+        const snippet = await configApi.getCommonConfigSnippet(appId);
 
         if (snippet && snippet.trim()) {
           if (mounted) {
@@ -78,13 +80,13 @@ export function useCommonConfigSnippet({
           }
         } else {
           // 如果 config.json 中没有，尝试从 localStorage 迁移
-          if (typeof window !== "undefined") {
+          if (appId === "claude" && typeof window !== "undefined") {
             try {
               const legacySnippet =
                 window.localStorage.getItem(LEGACY_STORAGE_KEY);
               if (legacySnippet && legacySnippet.trim()) {
                 // 迁移到 config.json
-                await configApi.setCommonConfigSnippet("claude", legacySnippet);
+                await configApi.setCommonConfigSnippet(appId, legacySnippet);
                 if (mounted) {
                   setCommonConfigSnippetState(legacySnippet);
                 }
@@ -113,7 +115,7 @@ export function useCommonConfigSnippet({
     return () => {
       mounted = false;
     };
-  }, [enabled]);
+  }, [appId, enabled]);
 
   // 初始化时检查通用配置片段（编辑模式）
   useEffect(() => {
@@ -236,14 +238,12 @@ export function useCommonConfigSnippet({
       if (!value.trim()) {
         setCommonConfigError("");
         // 保存到 config.json（清空）
-        configApi
-          .setCommonConfigSnippet("claude", "")
-          .catch((error: unknown) => {
-            console.error("保存通用配置失败:", error);
-            setCommonConfigError(
-              t("claudeConfig.saveFailed", { error: String(error) }),
-            );
-          });
+        configApi.setCommonConfigSnippet(appId, "").catch((error: unknown) => {
+          console.error("保存通用配置失败:", error);
+          setCommonConfigError(
+            t("claudeConfig.saveFailed", { error: String(error) }),
+          );
+        });
 
         if (useCommonConfig) {
           const { updatedConfig } = updateCommonConfigSnippet(
@@ -265,7 +265,7 @@ export function useCommonConfigSnippet({
         setCommonConfigError("");
         // 保存到 config.json
         configApi
-          .setCommonConfigSnippet("claude", value)
+          .setCommonConfigSnippet(appId, value)
           .catch((error: unknown) => {
             console.error("保存通用配置失败:", error);
             setCommonConfigError(
@@ -305,7 +305,14 @@ export function useCommonConfigSnippet({
         }, 0);
       }
     },
-    [commonConfigSnippet, settingsConfig, useCommonConfig, onConfigChange],
+    [
+      appId,
+      commonConfigSnippet,
+      settingsConfig,
+      useCommonConfig,
+      onConfigChange,
+      t,
+    ],
   );
 
   // 当配置变化时检查是否包含通用配置（但避免在通过通用配置更新时检查）
@@ -327,7 +334,7 @@ export function useCommonConfigSnippet({
     setCommonConfigError("");
 
     try {
-      const extracted = await configApi.extractCommonConfigSnippet("claude", {
+      const extracted = await configApi.extractCommonConfigSnippet(appId, {
         settingsConfig,
       });
 
@@ -347,7 +354,7 @@ export function useCommonConfigSnippet({
       setCommonConfigSnippetState(extracted);
 
       // 保存到后端
-      await configApi.setCommonConfigSnippet("claude", extracted);
+      await configApi.setCommonConfigSnippet(appId, extracted);
     } catch (error) {
       console.error("提取通用配置失败:", error);
       setCommonConfigError(
@@ -356,7 +363,7 @@ export function useCommonConfigSnippet({
     } finally {
       setIsExtracting(false);
     }
-  }, [settingsConfig, t]);
+  }, [appId, settingsConfig, t]);
 
   return {
     useCommonConfig,

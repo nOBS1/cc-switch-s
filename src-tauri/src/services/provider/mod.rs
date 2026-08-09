@@ -2421,7 +2421,7 @@ requires_openai_auth = true
 
 impl ProviderService {
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
-        if matches!(app_type, AppType::Claude) {
+        if matches!(app_type, AppType::Claude | AppType::ClaudeCometix) {
             let mut v = provider.settings_config.clone();
             if normalize_claude_models_in_value(&mut v) {
                 provider.settings_config = v;
@@ -3378,7 +3378,7 @@ impl ProviderService {
     /// 读到的 live 一定是"片段 + 本地改动"的超集，重提取只会丢掉用户真正删掉的键，
     /// 不会误删其它供应商共享的内容。
     ///
-    /// **作用域**：Claude + Codex。Codex 提取器（`extract_codex_common_config`）
+    /// **作用域**：Claude（官方与 Cometix 独立域）+ Codex。Codex 提取器（`extract_codex_common_config`）
     /// 已剥离全部供应商专属与 cc-switch 注入内容：`model` / `model_provider` /
     /// 顶层 `base_url` / 整张 `model_providers` 表（含端点与统一会话桶）、
     /// `mcp_servers`（SSOT 在 DB 表）、顶层 `experimental_bearer_token`
@@ -3395,8 +3395,11 @@ impl ProviderService {
         live_config: &Value,
         result: &mut SwitchResult,
     ) {
-        // 作用域限定 Claude + Codex（见函数文档）。
-        if !matches!(app_type, AppType::Claude | AppType::Codex) {
+        // 作用域限定两个独立 Claude 域 + Codex（见函数文档）。
+        if !matches!(
+            app_type,
+            AppType::Claude | AppType::ClaudeCometix | AppType::Codex
+        ) {
             return;
         }
 
@@ -3481,7 +3484,9 @@ impl ProviderService {
             .ok_or_else(|| AppError::Message(format!("Provider {current_id} not found")))?;
 
         match app_type {
-            AppType::Claude => Self::extract_claude_common_config(&provider.settings_config),
+            AppType::Claude | AppType::ClaudeCometix => {
+                Self::extract_claude_common_config(&provider.settings_config)
+            }
             AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(&provider.settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(&provider.settings_config),
@@ -3498,7 +3503,9 @@ impl ProviderService {
         settings_config: &Value,
     ) -> Result<String, AppError> {
         match app_type {
-            AppType::Claude => Self::extract_claude_common_config(settings_config),
+            AppType::Claude | AppType::ClaudeCometix => {
+                Self::extract_claude_common_config(settings_config)
+            }
             AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(settings_config),
@@ -4157,7 +4164,7 @@ impl ProviderService {
 
     fn validate_provider_settings(app_type: &AppType, provider: &Provider) -> Result<(), AppError> {
         match app_type {
-            AppType::Claude => {
+            AppType::Claude | AppType::ClaudeCometix => {
                 if !provider.settings_config.is_object() {
                     return Err(AppError::localized(
                         "provider.claude.settings.not_object",
@@ -4295,7 +4302,7 @@ impl ProviderService {
         app_type: &AppType,
     ) -> Result<(String, String), AppError> {
         match app_type {
-            AppType::Claude => {
+            AppType::Claude | AppType::ClaudeCometix => {
                 let env = provider
                     .settings_config
                     .get("env")

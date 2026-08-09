@@ -31,6 +31,9 @@ impl McpService {
         if prev_apps.claude && !server.apps.claude {
             Self::remove_server_from_app(state, &server.id, &AppType::Claude)?;
         }
+        if prev_apps.claude_cometix && !server.apps.claude_cometix {
+            Self::remove_server_from_app(state, &server.id, &AppType::ClaudeCometix)?;
+        }
         if prev_apps.codex && !server.apps.codex {
             Self::remove_server_from_app(state, &server.id, &AppType::Codex)?;
         }
@@ -113,6 +116,13 @@ impl McpService {
             AppType::Claude => {
                 mcp::sync_single_server_to_claude(&Default::default(), &server.id, &server.server)?;
             }
+            AppType::ClaudeCometix => {
+                mcp::sync_single_server_to_claude_cometix(
+                    &Default::default(),
+                    &server.id,
+                    &server.server,
+                )?;
+            }
             AppType::ClaudeDesktop => {
                 log::debug!("Claude Desktop 3P profiles do not use CC Switch MCP sync, skipping");
             }
@@ -165,6 +175,7 @@ impl McpService {
     fn remove_server_from_app(_state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
         match app {
             AppType::Claude => mcp::remove_server_from_claude(id)?,
+            AppType::ClaudeCometix => mcp::remove_server_from_claude_cometix(id)?,
             AppType::ClaudeDesktop => {
                 log::debug!("Claude Desktop 3P profiles do not use CC Switch MCP sync, skipping");
             }

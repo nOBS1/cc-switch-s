@@ -534,6 +534,7 @@ impl SkillService {
                     return Ok(custom.join("skills"));
                 }
             }
+            AppType::ClaudeCometix => {}
             AppType::ClaudeDesktop => {}
             AppType::Codex => {
                 if let Some(custom) = crate::settings::get_codex_override_dir() {
@@ -574,6 +575,7 @@ impl SkillService {
 
         Ok(match app {
             AppType::Claude => home.join(".claude").join("skills"),
+            AppType::ClaudeCometix => home.join(".claude-cometix").join("skills"),
             AppType::ClaudeDesktop => home.join(".claude-desktop").join("skills"),
             AppType::Codex => home.join(".codex").join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),

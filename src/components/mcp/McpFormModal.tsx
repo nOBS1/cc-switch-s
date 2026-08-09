@@ -63,6 +63,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
 
   const [enabledApps, setEnabledApps] = useState<{
     claude: boolean;
+    "claude-cometix": boolean;
     codex: boolean;
     gemini: boolean;
     grokbuild: boolean;
@@ -73,11 +74,13 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
     if (initialData?.apps) {
       return {
         ...initialData.apps,
+        "claude-cometix": initialData.apps["claude-cometix"] ?? false,
         grokbuild: initialData.apps.grokbuild ?? false,
       };
     }
     return {
       claude: defaultEnabledApps.includes("claude"),
+      "claude-cometix": defaultEnabledApps.includes("claude-cometix"),
       codex: defaultEnabledApps.includes("codex"),
       gemini: defaultEnabledApps.includes("gemini"),
       grokbuild: defaultEnabledApps.includes("grokbuild"),
@@ -543,6 +546,25 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
                     className="text-sm text-foreground cursor-pointer select-none"
                   >
                     {t("mcp.unifiedPanel.apps.claude")}
+                  </label>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="enable-claude-cometix"
+                    checked={enabledApps["claude-cometix"]}
+                    onCheckedChange={(checked: boolean) =>
+                      setEnabledApps({
+                        ...enabledApps,
+                        "claude-cometix": checked,
+                      })
+                    }
+                  />
+                  <label
+                    htmlFor="enable-claude-cometix"
+                    className="text-sm text-foreground cursor-pointer select-none"
+                  >
+                    {t("mcp.unifiedPanel.apps.claudeCometix")}
                   </label>
                 </div>
 

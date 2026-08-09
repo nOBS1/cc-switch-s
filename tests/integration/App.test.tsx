@@ -198,7 +198,7 @@ describe("App integration with MSW", () => {
     localStorage.removeItem("cc-switch-last-view");
   });
 
-  it("routes the Cometix UI entry through the shared Claude provider domain", async () => {
+  it("routes the Cometix UI entry through its independent provider domain", async () => {
     localStorage.setItem("cc-switch-last-app", "codex");
     const getAllSpy = vi.spyOn(providersApi, "getAll");
 
@@ -212,7 +212,7 @@ describe("App integration with MSW", () => {
       expect(screen.getByTestId("app-switcher")).toHaveTextContent(
         "claude-cometix",
       );
-      expect(getAllSpy).toHaveBeenCalledWith("claude");
+      expect(getAllSpy).toHaveBeenCalledWith("claude-cometix");
     });
 
     getAllSpy.mockRestore();

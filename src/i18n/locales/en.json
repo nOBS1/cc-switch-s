@@ -106,6 +106,7 @@
     "noProviders": "No providers added yet",
     "noProvidersDescription": "If you already have a config, click \"Import Current Config\" — all data will be safely saved in a default provider",
     "noProvidersDescriptionSnippet": "Settings other than API key and endpoint (e.g. plugins) will be saved to a common config snippet for sharing across providers",
+    "noProvidersDescriptionSnippetCometix": "Common config snippets are shared only among providers in the Claude Code (Cometix) entry, never with the official Claude Code entry",
     "importCurrent": "Import Current Config",
     "importFromClaude": "Import existing providers from Claude Code",
     "importCurrentDescription": "Import current live config as default provider",
@@ -1808,6 +1809,7 @@
       "noSearchResults": "No MCP servers match your search",
       "apps": {
         "claude": "Claude",
+        "claudeCometix": "Claude Code (Cometix)",
         "codex": "Codex",
         "gemini": "Gemini",
         "grokbuild": "Grok Build",

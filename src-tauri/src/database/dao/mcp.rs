@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension, Row};
 
 const MCP_SERVER_SELECT: &str =
-    "SELECT id, name, server_config, description, homepage, docs, tags, enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild, enabled_opencode, enabled_hermes FROM mcp_servers";
+    "SELECT id, name, server_config, description, homepage, docs, tags, enabled_claude, enabled_claude_cometix, enabled_codex, enabled_gemini, enabled_grokbuild, enabled_opencode, enabled_hermes FROM mcp_servers";
 
 fn row_to_mcp_server(row: &Row<'_>) -> rusqlite::Result<(String, McpServer)> {
     let id: String = row.get(0)?;
@@ -20,11 +20,12 @@ fn row_to_mcp_server(row: &Row<'_>) -> rusqlite::Result<(String, McpServer)> {
     let docs: Option<String> = row.get(5)?;
     let tags_str: String = row.get(6)?;
     let enabled_claude: bool = row.get(7)?;
-    let enabled_codex: bool = row.get(8)?;
-    let enabled_gemini: bool = row.get(9)?;
-    let enabled_grokbuild: bool = row.get(10)?;
-    let enabled_opencode: bool = row.get(11)?;
-    let enabled_hermes: bool = row.get(12)?;
+    let enabled_claude_cometix: bool = row.get(8)?;
+    let enabled_codex: bool = row.get(9)?;
+    let enabled_gemini: bool = row.get(10)?;
+    let enabled_grokbuild: bool = row.get(11)?;
+    let enabled_opencode: bool = row.get(12)?;
+    let enabled_hermes: bool = row.get(13)?;
 
     let server = serde_json::from_str(&server_config_str).unwrap_or_default();
     let tags = serde_json::from_str(&tags_str).unwrap_or_default();
@@ -37,6 +38,7 @@ fn row_to_mcp_server(row: &Row<'_>) -> rusqlite::Result<(String, McpServer)> {
             server,
             apps: McpApps {
                 claude: enabled_claude,
+                claude_cometix: enabled_claude_cometix,
                 codex: enabled_codex,
                 gemini: enabled_gemini,
                 grokbuild: enabled_grokbuild,
@@ -85,6 +87,7 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let column = match app {
             AppType::Claude => Some("enabled_claude"),
+            AppType::ClaudeCometix => Some("enabled_claude_cometix"),
             AppType::Codex => Some("enabled_codex"),
             AppType::Gemini => Some("enabled_gemini"),
             AppType::GrokBuild => Some("enabled_grokbuild"),
@@ -120,8 +123,8 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO mcp_servers (
                 id, name, server_config, description, homepage, docs, tags,
-                enabled_claude, enabled_codex, enabled_gemini, enabled_grokbuild, enabled_opencode, enabled_hermes
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                enabled_claude, enabled_claude_cometix, enabled_codex, enabled_gemini, enabled_grokbuild, enabled_opencode, enabled_hermes
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 server.id,
                 server.name,
@@ -134,6 +137,7 @@ impl Database {
                 serde_json::to_string(&server.tags)
                     .map_err(|e| AppError::Database(format!("Failed to serialize tags: {e}")))?,
                 server.apps.claude,
+                server.apps.claude_cometix,
                 server.apps.codex,
                 server.apps.gemini,
                 server.apps.grokbuild,

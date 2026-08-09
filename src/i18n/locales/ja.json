@@ -106,6 +106,7 @@
     "noProviders": "まだプロバイダーがありません",
     "noProvidersDescription": "既存の設定がある場合は「現在の設定をインポート」をクリックしてください。すべてのデータが default プロバイダーに安全に保存されます",
     "noProvidersDescriptionSnippet": "API キーとリクエスト URL 以外のデータ（プラグインなど）は共通設定スニペットに保存され、プロバイダー間で共有できます",
+    "noProvidersDescriptionSnippetCometix": "共通設定スニペットは Claude Code（Cometix）内のプロバイダー間だけで共有され、公式 Claude Code とは共有されません",
     "importCurrent": "現在の設定をインポート",
     "importFromClaude": "Claude Code の既存プロバイダーをインポート",
     "importCurrentDescription": "現在使用中の設定をデフォルトプロバイダーとしてインポート",
@@ -1808,6 +1809,7 @@
       "noSearchResults": "検索に一致する MCP サーバーがありません",
       "apps": {
         "claude": "Claude",
+        "claudeCometix": "Claude Code（Cometix）",
         "codex": "Codex",
         "gemini": "Gemini",
         "grokbuild": "Grok Build",

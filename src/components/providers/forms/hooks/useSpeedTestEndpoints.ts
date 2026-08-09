@@ -43,7 +43,8 @@ export function useSpeedTestEndpoints({
 }: UseSpeedTestEndpointsProps) {
   const claudeEndpoints = useMemo<EndpointCandidate[]>(() => {
     // Reuse this branch for Claude and Gemini (non-Codex)
-    if (appId !== "claude" && appId !== "gemini") return [];
+    if (appId !== "claude" && appId !== "claude-cometix" && appId !== "gemini")
+      return [];
 
     const map = new Map<string, EndpointCandidate>();
     // 候选端点标记为 isCustom: false，表示来自预设或配置

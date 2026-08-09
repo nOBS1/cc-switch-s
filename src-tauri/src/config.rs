@@ -42,6 +42,14 @@ pub fn get_claude_config_dir() -> PathBuf {
     get_home_dir().join(".claude")
 }
 
+/// 获取 Cometix Claude Code 的独立配置目录。
+///
+/// 启动 Cometix 终端时会将该路径写入 `CLAUDE_CONFIG_DIR`，确保它不会读写
+/// 官方 Claude Code 使用的 `~/.claude`。
+pub fn get_claude_cometix_config_dir() -> PathBuf {
+    get_home_dir().join(".claude-cometix")
+}
+
 /// 默认 Claude MCP 配置文件路径 (~/.claude.json)
 pub fn get_default_claude_mcp_path() -> PathBuf {
     get_home_dir().join(".claude.json")
@@ -183,20 +191,31 @@ pub fn get_claude_mcp_path() -> PathBuf {
     get_default_claude_mcp_path()
 }
 
-/// 获取 Claude Code 主配置文件路径
-pub fn get_claude_settings_path() -> PathBuf {
-    let dir = get_claude_config_dir();
+/// 获取 Cometix Claude Code 的独立 MCP 配置文件路径。
+pub fn get_claude_cometix_mcp_path() -> PathBuf {
+    get_claude_cometix_config_dir().join(".claude.json")
+}
+
+fn claude_settings_path_in(dir: PathBuf) -> PathBuf {
     let settings = dir.join("settings.json");
     if settings.exists() {
         return settings;
     }
-    // 兼容旧版命名：若存在旧文件则继续使用
     let legacy = dir.join("claude.json");
     if legacy.exists() {
         return legacy;
     }
-    // 默认新建：回落到标准文件名 settings.json（不再生成 claude.json）
     settings
+}
+
+/// 获取 Claude Code 主配置文件路径
+pub fn get_claude_settings_path() -> PathBuf {
+    claude_settings_path_in(get_claude_config_dir())
+}
+
+/// 获取 Cometix Claude Code 的独立主配置文件路径。
+pub fn get_claude_cometix_settings_path() -> PathBuf {
+    claude_settings_path_in(get_claude_cometix_config_dir())
 }
 
 /// 获取应用配置目录路径 (~/.cc-switch)
@@ -471,6 +490,21 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cometix_paths_are_isolated_from_official_claude_paths() {
+        let home = get_home_dir();
+        let cometix_dir = home.join(".claude-cometix");
+        assert_eq!(get_claude_cometix_config_dir(), cometix_dir);
+        assert_eq!(
+            get_claude_cometix_settings_path().parent(),
+            Some(cometix_dir.as_path())
+        );
+        assert_eq!(
+            get_claude_cometix_mcp_path(),
+            cometix_dir.join(".claude.json")
+        );
+    }
 
     #[cfg(windows)]
     #[test]

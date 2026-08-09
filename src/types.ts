@@ -408,6 +408,8 @@ export interface Settings {
   // ===== 当前供应商 ID（设备级）=====
   // 当前 Claude 供应商 ID（优先于数据库 is_current）
   currentProviderClaude?: string;
+  // 当前 Cometix Claude Code 供应商 ID（独立于官方 Claude）
+  currentProviderClaudeCometix?: string;
   // 当前 Claude Desktop 供应商 ID（优先于数据库 is_current）
   currentProviderClaudeDesktop?: string;
   // 当前 Codex 供应商 ID（优先于数据库 is_current）
@@ -489,6 +491,7 @@ export interface McpServerSpec {
 // v3.7.0: MCP 服务器应用启用状态
 export interface McpApps {
   claude: boolean;
+  "claude-cometix"?: boolean;
   "claude-desktop"?: boolean;
   codex: boolean;
   gemini: boolean;

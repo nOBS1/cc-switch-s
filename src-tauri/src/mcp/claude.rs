@@ -14,6 +14,11 @@ fn should_sync_claude_mcp() -> bool {
     crate::config::get_claude_config_dir().exists() || crate::config::get_claude_mcp_path().exists()
 }
 
+fn should_sync_claude_cometix_mcp() -> bool {
+    crate::config::get_claude_cometix_config_dir().exists()
+        || crate::config::get_claude_cometix_mcp_path().exists()
+}
+
 /// 返回已启用的 MCP 服务器（过滤 enabled==true）
 fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
     let mut out = HashMap::new();
@@ -89,6 +94,7 @@ pub fn import_from_claude(config: &mut MultiAppConfig) -> Result<usize, AppError
                     server: spec.clone(),
                     apps: McpApps {
                         claude: true,
+                        claude_cometix: false,
                         codex: false,
                         gemini: false,
                         grokbuild: false,
@@ -133,6 +139,21 @@ pub fn sync_single_server_to_claude(
     crate::claude_mcp::set_mcp_servers_map(&updated)
 }
 
+/// 将单个 MCP 服务器同步到 Cometix 的独立配置域。
+pub fn sync_single_server_to_claude_cometix(
+    _config: &MultiAppConfig,
+    id: &str,
+    server_spec: &Value,
+) -> Result<(), AppError> {
+    if !should_sync_claude_cometix_mcp() {
+        return Ok(());
+    }
+    let path = crate::config::get_claude_cometix_mcp_path();
+    let mut updated = crate::claude_mcp::read_mcp_servers_map_at(&path)?;
+    updated.insert(id.to_string(), server_spec.clone());
+    crate::claude_mcp::set_mcp_servers_map_at(&path, &updated)
+}
+
 /// 从 Claude live 配置中移除单个 MCP 服务器
 pub fn remove_server_from_claude(id: &str) -> Result<(), AppError> {
     if !should_sync_claude_mcp() {
@@ -146,4 +167,15 @@ pub fn remove_server_from_claude(id: &str) -> Result<(), AppError> {
 
     // 写回
     crate::claude_mcp::set_mcp_servers_map(&current)
+}
+
+/// 从 Cometix 的独立配置域移除单个 MCP 服务器。
+pub fn remove_server_from_claude_cometix(id: &str) -> Result<(), AppError> {
+    if !should_sync_claude_cometix_mcp() {
+        return Ok(());
+    }
+    let path = crate::config::get_claude_cometix_mcp_path();
+    let mut current = crate::claude_mcp::read_mcp_servers_map_at(&path)?;
+    current.remove(id);
+    crate::claude_mcp::set_mcp_servers_map_at(&path, &current)
 }
