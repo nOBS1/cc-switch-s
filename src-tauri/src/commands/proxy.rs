@@ -3,10 +3,18 @@
 //! 提供前端调用的 API 接口
 
 use crate::error::AppError;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::proxy::types::*;
 use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
 use std::str::FromStr;
+
+fn ensure_proxy_app_management_allowed(app_type: &str) -> Result<(), AppError> {
+    if let Ok(app) = crate::app_config::AppType::from_str(app_type) {
+        ensure_app_management_allowed(&app)?;
+    }
+    Ok(())
+}
 
 /// 启动代理服务器（仅启动服务，不接管 Live 配置）
 #[tauri::command]
@@ -56,6 +64,7 @@ pub async fn set_proxy_takeover_for_app(
     app_type: String,
     enabled: bool,
 ) -> Result<(), String> {
+    ensure_proxy_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     state
         .proxy_service
         .set_takeover_for_app(&app_type, enabled)
@@ -136,6 +145,7 @@ pub async fn update_proxy_config_for_app(
 ) -> Result<(), String> {
     let db = &state.db;
     let app_type = config.app_type.clone();
+    ensure_proxy_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     let circuit_config = CircuitBreakerConfig::from(&config);
 
     db.update_proxy_config_for_app(config)
@@ -180,6 +190,7 @@ async fn set_default_cost_multiplier_internal(
     app_type: &str,
     value: &str,
 ) -> Result<(), AppError> {
+    ensure_proxy_app_management_allowed(app_type)?;
     let db = &state.db;
     db.set_default_cost_multiplier(app_type, value).await
 }
@@ -237,6 +248,7 @@ async fn set_pricing_model_source_internal(
     app_type: &str,
     value: &str,
 ) -> Result<(), AppError> {
+    ensure_proxy_app_management_allowed(app_type)?;
     let db = &state.db;
     db.set_pricing_model_source(app_type, value).await
 }
@@ -281,6 +293,7 @@ pub async fn switch_proxy_provider(
     app_type: String,
     provider_id: String,
 ) -> Result<(), String> {
+    ensure_proxy_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     // Codex's built-in official provider can use the client's native OpenAI
     // login through takeover. Other official providers remain blocked.
     let provider = state
@@ -332,6 +345,7 @@ pub async fn reset_circuit_breaker(
     provider_id: String,
     app_type: String,
 ) -> Result<(), String> {
+    ensure_proxy_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     // 1. 重置数据库健康状态
     let db = &state.db;
     db.update_provider_health(&provider_id, &app_type, true, None)

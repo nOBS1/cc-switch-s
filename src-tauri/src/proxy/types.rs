@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Fork-specific local routing port. The upstream CC Switch application uses
+/// 15721, so this value must remain distinct to allow both apps to run.
+pub const DEFAULT_PROXY_PORT: u16 = 15731;
+
 /// 代理服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -43,7 +47,7 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             listen_address: "127.0.0.1".to_string(),
-            listen_port: 15721, // 使用较少占用的高位端口
+            listen_port: DEFAULT_PROXY_PORT,
             max_retries: 3,
             request_timeout: 600,
             enable_logging: true,
@@ -371,6 +375,12 @@ impl LogConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_config_uses_fork_specific_default_port() {
+        assert_eq!(DEFAULT_PROXY_PORT, 15731);
+        assert_eq!(ProxyConfig::default().listen_port, DEFAULT_PROXY_PORT);
+    }
 
     #[test]
     fn test_rectifier_config_default_enabled() {

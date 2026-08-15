@@ -21,7 +21,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
     let base_dir: PathBuf = match app {
         AppType::Claude => get_base_dir_with_fallback(get_claude_settings_path(), ".claude")?,
         AppType::ClaudeCometix => {
-            get_base_dir_with_fallback(get_claude_cometix_settings_path(), ".claude-cometix")?
+            get_base_dir_with_fallback(get_claude_cometix_settings_path(), ".hlclaude")?
         }
         AppType::Codex => get_base_dir_with_fallback(get_codex_auth_path(), ".codex")?,
         AppType::Gemini => get_gemini_dir(),
@@ -45,21 +45,6 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
     Ok(base_dir.join(filename))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hermes_prompt_file_uses_soul_md() {
-        let path = prompt_file_path(&AppType::Hermes).expect("Hermes prompt path");
-
-        assert_eq!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("SOUL.md")
-        );
-    }
-}
-
 fn get_base_dir_with_fallback(
     primary_path: PathBuf,
     fallback_dir: &str,
@@ -75,4 +60,26 @@ fn get_base_dir_with_fallback(
                 format!("Cannot determine {fallback_dir} config directory: user home not found"),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hermes_prompt_file_uses_soul_md() {
+        let path = prompt_file_path(&AppType::Hermes).expect("Hermes prompt path");
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("SOUL.md")
+        );
+    }
+
+    #[test]
+    fn cometix_prompt_file_uses_hlclaude_directory() {
+        let path = prompt_file_path(&AppType::ClaudeCometix).expect("Cometix prompt path");
+
+        assert!(path.ends_with(PathBuf::from(".hlclaude").join("CLAUDE.md")));
+    }
 }

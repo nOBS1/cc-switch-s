@@ -4,6 +4,7 @@ use std::str::FromStr;
 use tauri::State;
 
 use crate::app_config::AppType;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::prompt::Prompt;
 use crate::services::PromptService;
 use crate::store::AppState;
@@ -25,6 +26,7 @@ pub async fn upsert_prompt(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     PromptService::upsert_prompt(&state, app_type, &id, prompt).map_err(|e| e.to_string())
 }
 
@@ -35,6 +37,7 @@ pub async fn delete_prompt(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     PromptService::delete_prompt(&state, app_type, &id).map_err(|e| e.to_string())
 }
 
@@ -45,6 +48,7 @@ pub async fn enable_prompt(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     PromptService::enable_prompt(&state, app_type, &id).map_err(|e| e.to_string())
 }
 
@@ -54,6 +58,7 @@ pub async fn import_prompt_from_file(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     PromptService::import_from_file(&state, app_type).map_err(|e| e.to_string())
 }
 

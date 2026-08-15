@@ -19,9 +19,10 @@ pub fn parse_deeplink_url(url_str: &str) -> Result<DeepLinkImportRequest, AppErr
 
     // Validate scheme
     let scheme = url.scheme();
-    if scheme != "ccswitch" {
+    if scheme != super::DEEP_LINK_SCHEME && scheme != super::LEGACY_DEEP_LINK_SCHEME {
         return Err(AppError::InvalidInput(format!(
-            "Invalid scheme: expected 'ccswitch', got '{scheme}'"
+            "Invalid scheme: expected '{}', got '{scheme}'",
+            super::DEEP_LINK_SCHEME
         )));
     }
 
@@ -81,10 +82,17 @@ fn parse_provider_deeplink(
     // Validate app type
     if !matches!(
         app.as_str(),
-        "claude" | "codex" | "gemini" | "grokbuild" | "opencode" | "openclaw" | "hermes"
+        "claude"
+            | "claude-cometix"
+            | "codex"
+            | "gemini"
+            | "grokbuild"
+            | "opencode"
+            | "openclaw"
+            | "hermes"
     ) {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', or 'hermes', got '{app}'"
+            "Invalid app type: must be 'claude', 'claude-cometix', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', or 'hermes', got '{app}'"
         )));
     }
 
@@ -190,10 +198,17 @@ fn parse_prompt_deeplink(
     // Validate app type
     if !matches!(
         app.as_str(),
-        "claude" | "codex" | "gemini" | "grokbuild" | "opencode" | "openclaw" | "hermes"
+        "claude"
+            | "claude-cometix"
+            | "codex"
+            | "gemini"
+            | "grokbuild"
+            | "opencode"
+            | "openclaw"
+            | "hermes"
     ) {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', or 'hermes', got '{app}'"
+            "Invalid app type: must be 'claude', 'claude-cometix', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', or 'hermes', got '{app}'"
         )));
     }
 
@@ -263,6 +278,7 @@ fn parse_mcp_deeplink(
         if !matches!(
             trimmed,
             "claude"
+                | "claude-cometix"
                 | "codex"
                 | "gemini"
                 | "grokbuild"
@@ -272,7 +288,7 @@ fn parse_mcp_deeplink(
                 | "hermes"
         ) {
             return Err(AppError::InvalidInput(format!(
-                "Invalid app in 'apps': must be 'claude', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', or 'hermes', got '{trimmed}'"
+                "Invalid app in 'apps': must be 'claude', 'claude-cometix', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', or 'hermes', got '{trimmed}'"
             )));
         }
     }

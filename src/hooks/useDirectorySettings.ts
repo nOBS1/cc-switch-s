@@ -5,12 +5,10 @@ import { homeDir, join } from "@tauri-apps/api/path";
 import { settingsApi, type AppId } from "@/lib/api";
 import type { SettingsFormState } from "./useSettingsForm";
 
-export type DirectoryAppId = Exclude<
-  AppId,
-  "claude-desktop" | "claude-cometix"
->;
+export type DirectoryAppId = Exclude<AppId, "claude-desktop">;
 type AppDirectoryKey =
   | "claude"
+  | "claude-cometix"
   | "codex"
   | "gemini"
   | "grokbuild"
@@ -22,6 +20,7 @@ type DirectoryKey = "appConfig" | AppDirectoryKey;
 export interface ResolvedDirectories {
   appConfig: string;
   claude: string;
+  "claude-cometix": string;
   codex: string;
   gemini: string;
   grokbuild: string;
@@ -36,6 +35,10 @@ const APP_DIRECTORY_META: Record<
   { key: AppDirectoryKey; defaultFolder: string }
 > = {
   claude: { key: "claude", defaultFolder: ".claude" },
+  "claude-cometix": {
+    key: "claude-cometix",
+    defaultFolder: ".hlclaude",
+  },
   codex: { key: "codex", defaultFolder: ".codex" },
   gemini: { key: "gemini", defaultFolder: ".gemini" },
   grokbuild: { key: "grokbuild", defaultFolder: ".grok" },
@@ -49,6 +52,7 @@ const DIRECTORY_KEY_TO_SETTINGS_FIELD: Record<
   keyof SettingsFormState
 > = {
   claude: "claudeConfigDir",
+  "claude-cometix": "claudeCometixConfigDir",
   codex: "codexConfigDir",
   gemini: "geminiConfigDir",
   grokbuild: "grokConfigDir",
@@ -66,7 +70,7 @@ const sanitizeDir = (value?: string | null): string | undefined => {
 const computeDefaultAppConfigDir = async (): Promise<string | undefined> => {
   try {
     const home = await homeDir();
-    return await join(home, ".cc-switch");
+    return await join(home, ".cc-switch-cometix");
   } catch (error) {
     console.error(
       "[useDirectorySettings] Failed to resolve default app config dir",
@@ -135,6 +139,7 @@ export function useDirectorySettings({
   const [resolvedDirs, setResolvedDirs] = useState<ResolvedDirectories>({
     appConfig: "",
     claude: "",
+    "claude-cometix": "",
     codex: "",
     gemini: "",
     grokbuild: "",
@@ -147,6 +152,7 @@ export function useDirectorySettings({
   const defaultsRef = useRef<ResolvedDirectories>({
     appConfig: "",
     claude: "",
+    "claude-cometix": "",
     codex: "",
     gemini: "",
     grokbuild: "",
@@ -166,6 +172,7 @@ export function useDirectorySettings({
         const [
           overrideRaw,
           claudeDir,
+          claudeCometixDir,
           codexDir,
           geminiDir,
           grokDir,
@@ -174,6 +181,7 @@ export function useDirectorySettings({
           hermesDir,
           defaultAppConfig,
           defaultClaudeDir,
+          defaultClaudeCometixDir,
           defaultCodexDir,
           defaultGeminiDir,
           defaultGrokDir,
@@ -183,6 +191,7 @@ export function useDirectorySettings({
         ] = await Promise.all([
           settingsApi.getAppConfigDirOverride(),
           settingsApi.getConfigDir("claude"),
+          settingsApi.getConfigDir("claude-cometix"),
           settingsApi.getConfigDir("codex"),
           settingsApi.getConfigDir("gemini"),
           settingsApi.getConfigDir("grokbuild"),
@@ -191,6 +200,7 @@ export function useDirectorySettings({
           settingsApi.getConfigDir("hermes"),
           computeDefaultAppConfigDir(),
           computeDefaultConfigDir("claude"),
+          computeDefaultConfigDir("claude-cometix"),
           computeDefaultConfigDir("codex"),
           computeDefaultConfigDir("gemini"),
           computeDefaultConfigDir("grokbuild"),
@@ -206,6 +216,7 @@ export function useDirectorySettings({
         defaultsRef.current = {
           appConfig: defaultAppConfig ?? "",
           claude: defaultClaudeDir ?? "",
+          "claude-cometix": defaultClaudeCometixDir ?? "",
           codex: defaultCodexDir ?? "",
           gemini: defaultGeminiDir ?? "",
           grokbuild: defaultGrokDir ?? "",
@@ -220,6 +231,8 @@ export function useDirectorySettings({
         setResolvedDirs({
           appConfig: normalizedOverride ?? defaultsRef.current.appConfig,
           claude: claudeDir || defaultsRef.current.claude,
+          "claude-cometix":
+            claudeCometixDir || defaultsRef.current["claude-cometix"],
           codex: codexDir || defaultsRef.current.codex,
           gemini: geminiDir || defaultsRef.current.gemini,
           grokbuild: grokDir || defaultsRef.current.grokbuild,
@@ -362,6 +375,9 @@ export function useDirectorySettings({
         appConfig:
           initialAppConfigDirRef.current ?? defaultsRef.current.appConfig,
         claude: overrides?.claude ?? defaultsRef.current.claude,
+        "claude-cometix":
+          overrides?.["claude-cometix"] ??
+          defaultsRef.current["claude-cometix"],
         codex: overrides?.codex ?? defaultsRef.current.codex,
         gemini: overrides?.gemini ?? defaultsRef.current.gemini,
         grokbuild: overrides?.grokbuild ?? defaultsRef.current.grokbuild,

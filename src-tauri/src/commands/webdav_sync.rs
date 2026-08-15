@@ -275,7 +275,7 @@ mod tests {
             base_url: "https://dav.example.com/dav/".to_string(),
             username: "alice".to_string(),
             password: "secret".to_string(),
-            remote_root: "cc-switch-sync".to_string(),
+            remote_root: "my-private-root".to_string(),
             profile: "default".to_string(),
             ..WebDavSyncSettings::default()
         };
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(after.base_url, "https://dav.example.com/dav/");
         assert_eq!(after.username, "alice");
         assert_eq!(after.password, "secret");
-        assert_eq!(after.remote_root, "cc-switch-sync");
+        assert_eq!(after.remote_root, "my-private-root");
         assert_eq!(after.profile, "default");
         assert!(
             after

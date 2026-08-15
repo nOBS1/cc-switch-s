@@ -1,18 +1,17 @@
 <div align="center">
 
-# CC Switch
+# CC Switch Cometix
 
-### The All-in-One Manager for Claude Code, Claude Desktop, Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw & Hermes Agent
+### The All-in-One Manager for Claude Code (Official & Cometix), Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw & Hermes Agent
 
-[![Version](https://img.shields.io/github/v/release/farion1231/cc-switch?color=blue&label=version)](https://github.com/farion1231/cc-switch/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/farion1231/cc-switch/releases)
+[![Version](https://img.shields.io/github/v/release/nOBS1/cc-switch-s?color=blue&label=version)](https://github.com/nOBS1/cc-switch-s/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/nOBS1/cc-switch-s/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
-[![Downloads](https://img.shields.io/github/downloads/farion1231/cc-switch/total)](https://github.com/farion1231/cc-switch/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/nOBS1/cc-switch-s/total)](https://github.com/nOBS1/cc-switch-s/releases/latest)
 
-<a href="https://trendshift.io/repositories/15372" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15372" alt="farion1231%2Fcc-switch | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-<a href="https://www.star-history.com/#farion1231/cc-switch&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=farion1231/cc-switch&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=farion1231/cc-switch" width="196" height="55" /></picture></a>
+<a href="https://www.star-history.com/#nOBS1/cc-switch-s&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=nOBS1/cc-switch-s&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=nOBS1/cc-switch-s" width="196" height="55" /></picture></a>
 
-### 🌐 The Only Official Website: **[ccswitch.io](https://ccswitch.io)**
+### 🌐 Project Repository: **[nOBS1/cc-switch-s](https://github.com/nOBS1/cc-switch-s)**
 
 English | [中文](README_ZH.md) | [日本語](README_JA.md) | [Deutsch](README_DE.md) | [Changelog](CHANGELOG.md)
 
@@ -20,7 +19,7 @@ English | [中文](README_ZH.md) | [日本語](README_JA.md) | [Deutsch](README_
 
 ## ❤️Sponsor
 
-> [Want to appear here?](mailto:farion1231@gmail.com)
+> [Want to support this fork?](https://github.com/nOBS1/cc-switch-s/issues)
 
 <details open>
 <summary>Click to collapse</summary>
@@ -197,11 +196,11 @@ TeamoRouter also offers enterprise features including centralized billing, team 
 
 ## Why CC Switch?
 
-Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw, and Hermes — but each has its own configuration format. Switching API providers means manually editing JSON, TOML, or `.env` files, and there is no unified way to manage MCP and Skills across multiple tools.
+Modern AI-powered coding relies on tools like Claude Code, Claude Code (Cometix), Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw, and Hermes — but each has its own configuration format. Switching API providers means manually editing JSON, TOML, or `.env` files, and there is no unified way to manage MCP and Skills across multiple tools.
 
 **CC Switch** gives you a single desktop app to manage all supported AI tools. Instead of editing config files by hand, you get a visual interface to import providers with one click, switch between them instantly, with 50+ built-in provider presets, unified MCP and Skills management, and system tray quick switching — all backed by a reliable SQLite database with atomic writes that protect your configs from corruption.
 
-- **One App, Eight Tools** — Manage Claude Code, Claude Desktop, Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw, and Hermes from a single interface
+- **One App, Eight Tools** — Manage Claude Code, Claude Code (Cometix), Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw, and Hermes from a single interface
 - **No More Manual Editing** — 50+ provider presets including AWS Bedrock, NVIDIA NIM, and community relays; just pick and switch
 - **Unified MCP & Skills Management** — One panel to manage MCP servers and Skills across Claude, Codex, Gemini, Grok Build, OpenCode, and Hermes with bidirectional sync
 - **System Tray Quick Switch** — Switch providers instantly from the tray menu, no need to open the full app
@@ -221,7 +220,7 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 
 ### Provider Management
 
-- **8 supported tools, 50+ presets** — Claude Code, Claude Desktop, Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw, Hermes; copy your key and import with one click
+- **8 supported tools, 50+ presets** — Claude Code, Claude Code (Cometix), Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw, Hermes; copy your key and import with one click
 - **Universal providers** — One config syncs to Claude Code, Codex, and Gemini CLI
 - One-click switching, system tray quick access, drag-and-drop sorting, import/export
 
@@ -248,7 +247,7 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 ### System & Platform
 
 - **Cloud sync** — Custom config directory (Dropbox, OneDrive, iCloud, NAS) and WebDAV server sync
-- **Deep Link** (`ccswitch://`) — Import providers, MCP servers, prompts, and skills via URL
+- **Deep Link** (`ccswitch-cometix://`) — Import providers, MCP servers, prompts, and skills via URL
 - Dark / Light / System theme, auto-launch, auto-updater, atomic writes, auto-backups, i18n (zh/zh-TW/en/ja)
 
 ## FAQ
@@ -256,7 +255,7 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 <details>
 <summary><strong>Which AI tools does CC Switch support?</strong></summary>
 
-CC Switch supports eight tools: **Claude Code**, **Claude Desktop**, **Codex**, **Gemini CLI**, **Grok Build**, **OpenCode**, **OpenClaw**, and **Hermes**. Each tool has dedicated provider presets and configuration management.
+CC Switch Cometix supports eight tools: **Claude Code**, **Claude Code (Cometix)**, **Codex**, **Gemini CLI**, **Grok Build**, **OpenCode**, **OpenClaw**, and **Hermes**. Each tool has dedicated provider presets and configuration management.
 
 </details>
 
@@ -353,43 +352,27 @@ For detailed guides on every feature, check out the **[User Manual](docs/user-ma
 
 ### Windows Users
 
-Download the latest `CC-Switch-v{version}-Windows.msi` installer or `CC-Switch-v{version}-Windows-Portable.zip` portable version from the [Releases](../../releases) page.
+Download from [GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest):
+
+- **x86_64**: `CC-Switch-Cometix-v{version}-Windows.msi` or `CC-Switch-Cometix-v{version}-Windows-Portable.zip`
+- **ARM64**: `CC-Switch-Cometix-v{version}-Windows-arm64.msi` or `CC-Switch-Cometix-v{version}-Windows-arm64-Portable.zip`
 
 ### macOS Users
 
-**Method 1: Install via Homebrew (Recommended)**
-
-```bash
-brew install --cask cc-switch
-```
-
-Update:
-
-```bash
-brew upgrade --cask cc-switch
-```
-
-**Method 2: Manual Download**
-
-Download `CC-Switch-v{version}-macOS.dmg` (recommended) or `.zip` from the [Releases](../../releases) page.
+This fork does not currently publish a Homebrew cask. Download the universal macOS build from [GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest): `CC-Switch-Cometix-v{version}-macOS.dmg` (recommended) or `CC-Switch-Cometix-v{version}-macOS.zip`.
 
 > **Note**: CC Switch for macOS is code-signed and notarized by Apple. You can install and open it directly.
 
 ### Arch Linux Users
 
-**Install via paru (Recommended)**
-
-```bash
-paru -S cc-switch-bin
-```
+This fork does not currently publish an AUR package. Use the AppImage or another Linux asset from [GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest).
 
 ### Linux Users
 
-Download the latest Linux build from the [Releases](../../releases) page:
+Download the latest Linux build from [GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest):
 
-- `CC-Switch-v{version}-Linux.deb` (Debian/Ubuntu)
-- `CC-Switch-v{version}-Linux.rpm` (Fedora/RHEL/openSUSE)
-- `CC-Switch-v{version}-Linux.AppImage` (Universal)
+- **x86_64**: `CC-Switch-Cometix-v{version}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
+- **ARM64**: `CC-Switch-Cometix-v{version}-Linux-arm64.AppImage` / `.deb` / `.rpm`
 
 > **Flatpak**: Not included in official releases. You can build it yourself from the `.deb` — see [`flatpak/README.md`](flatpak/README.md) for instructions.
 
@@ -584,7 +567,7 @@ For new features, please open an issue for discussion before submitting a PR. PR
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=farion1231/cc-switch&type=Date)](https://www.star-history.com/#farion1231/cc-switch&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=nOBS1/cc-switch-s&type=Date)](https://www.star-history.com/#nOBS1/cc-switch-s&Date)
 
 ## License
 

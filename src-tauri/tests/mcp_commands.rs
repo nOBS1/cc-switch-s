@@ -62,7 +62,7 @@ fn import_default_config_claude_persists_provider() {
     );
 
     // 验证数据已持久化到数据库（v3.7.0+ 使用 SQLite 而非 config.json）
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    let db_path = home.join(".cc-switch-cometix").join("cc-switch.db");
     assert!(
         db_path.exists(),
         "importing default config should persist to cc-switch.db"
@@ -130,6 +130,15 @@ fn import_default_config_cometix_reads_official_claude_without_mutating_it() {
         fs::read_to_string(&official_path).expect("read official Claude settings after import"),
         original_contents,
         "importing into Cometix must not modify the official Claude settings file"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            &fs::read_to_string(&cometix_path)
+                .expect("Cometix import should project credentials to .hlclaude")
+        )
+        .expect("parse projected Cometix settings"),
+        settings,
+        "the imported provider must be immediately usable by hlclaude"
     );
 }
 
@@ -388,11 +397,553 @@ fn import_mcp_from_claude_creates_config_and_enables_servers() {
     );
 
     // 验证数据已持久化到数据库
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    let db_path = home.join(".cc-switch-cometix").join("cc-switch.db");
     assert!(
         db_path.exists(),
         "state.save should persist to cc-switch.db when changes detected"
     );
+}
+
+#[test]
+fn import_from_all_apps_imports_cometix_mcp_without_touching_official_claude() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let official_path = get_claude_mcp_path();
+    let official_original = r#"{"mcpServers":{},"officialMarker":"keep"}"#;
+    fs::write(&official_path, official_original).expect("seed official Claude MCP config");
+
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    let cometix_path = cometix_dir.join(".claude.json");
+    let cometix_original = r#"{
+  "mcpServers": {
+    "shared": { "type": "stdio", "command": "shared-command" },
+    "cometix-only": { "type": "stdio", "command": "cometix-command" }
+  },
+  "cometixMarker": "keep"
+}"#;
+    fs::write(&cometix_path, cometix_original).expect("seed Cometix MCP config");
+
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .save_mcp_server(&McpServer {
+            id: "shared".to_string(),
+            name: "Existing shared server".to_string(),
+            server: json!({ "type": "stdio", "command": "existing-command" }),
+            apps: McpApps {
+                claude: false,
+                claude_cometix: false,
+                codex: true,
+                gemini: false,
+                grokbuild: false,
+                opencode: false,
+                hermes: false,
+            },
+            description: Some("preserve existing metadata".to_string()),
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        })
+        .expect("seed existing MCP server");
+
+    let imported =
+        McpService::import_from_all_apps(&state).expect("all-app import should include Cometix");
+    assert_eq!(
+        imported, 2,
+        "Cometix owns independent definitions even when another app uses the same live id"
+    );
+
+    let servers = state.db.get_all_mcp_servers().expect("get all MCP servers");
+    let shared = servers.get("shared").expect("existing server remains");
+    assert!(
+        !shared.apps.claude_cometix,
+        "the existing shared row must not become the Cometix definition"
+    );
+    assert!(
+        !shared.apps.claude,
+        "official Claude flag must stay disabled"
+    );
+    assert!(shared.apps.codex, "unrelated app flags must be preserved");
+    assert_eq!(
+        shared.server,
+        json!({ "type": "stdio", "command": "existing-command" }),
+        "import must not overwrite an existing server definition"
+    );
+
+    #[allow(deprecated)]
+    let cometix_servers = McpService::get_servers(&state, AppType::ClaudeCometix)
+        .expect("get Cometix MCP definitions");
+    assert_eq!(
+        cometix_servers
+            .get("shared")
+            .and_then(|spec| spec.get("command"))
+            .and_then(|value| value.as_str()),
+        Some("shared-command"),
+        "same live id must retain the Cometix definition"
+    );
+    assert!(cometix_servers.contains_key("cometix-only"));
+
+    assert_eq!(
+        fs::read_to_string(&official_path).expect("read official MCP config"),
+        official_original,
+        "Cometix import must not rewrite official Claude live config"
+    );
+    assert_eq!(
+        fs::read_to_string(&cometix_path).expect("read Cometix MCP config"),
+        cometix_original,
+        "import must not write back to Cometix live config"
+    );
+}
+
+#[test]
+#[allow(deprecated)]
+fn same_live_id_imports_independent_official_and_cometix_definitions() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    fs::write(
+        get_claude_mcp_path(),
+        serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "shared": {
+                    "type": "stdio",
+                    "command": "official-command",
+                    "args": ["official"]
+                }
+            }
+        }))
+        .expect("serialize official MCP config"),
+    )
+    .expect("seed official MCP config");
+
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    fs::write(
+        cometix_dir.join(".claude.json"),
+        serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "shared": {
+                    "type": "stdio",
+                    "command": "cometix-command",
+                    "args": ["cometix"]
+                }
+            }
+        }))
+        .expect("serialize Cometix MCP config"),
+    )
+    .expect("seed Cometix MCP config");
+
+    let state = create_test_state().expect("create test state");
+    McpService::import_from_claude(&state).expect("import official MCP config");
+    McpService::import_from_claude_cometix(&state).expect("import Cometix MCP config");
+
+    let official =
+        McpService::get_servers(&state, AppType::Claude).expect("get official MCP servers");
+    let cometix =
+        McpService::get_servers(&state, AppType::ClaudeCometix).expect("get Cometix MCP servers");
+
+    assert_eq!(
+        official
+            .get("shared")
+            .and_then(|spec| spec.get("command"))
+            .and_then(|value| value.as_str()),
+        Some("official-command")
+    );
+    assert_eq!(
+        cometix
+            .get("shared")
+            .and_then(|spec| spec.get("command"))
+            .and_then(|value| value.as_str()),
+        Some("cometix-command")
+    );
+}
+
+#[test]
+fn editing_and_projecting_cometix_same_id_preserves_official_live_definition() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let official_path = get_claude_mcp_path();
+    fs::write(
+        &official_path,
+        serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "shared": { "type": "stdio", "command": "official-command" }
+            },
+            "officialMarker": "keep"
+        }))
+        .expect("serialize official MCP config"),
+    )
+    .expect("seed official MCP config");
+
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    let cometix_path = cometix_dir.join(".claude.json");
+    fs::write(
+        &cometix_path,
+        serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "shared": { "type": "stdio", "command": "cometix-command" }
+            },
+            "cometixMarker": "keep"
+        }))
+        .expect("serialize Cometix MCP config"),
+    )
+    .expect("seed Cometix MCP config");
+
+    let state = create_test_state().expect("create test state");
+    McpService::import_from_claude(&state).expect("import official MCP config");
+    McpService::import_from_claude_cometix(&state).expect("import Cometix MCP config");
+
+    let mut cometix_server = state
+        .db
+        .get_all_mcp_servers()
+        .expect("get stored MCP servers")
+        .into_values()
+        .find(|server| server.apps.claude_cometix)
+        .expect("find scoped Cometix server");
+    cometix_server.server = json!({
+        "type": "stdio",
+        "command": "cometix-edited"
+    });
+    McpService::upsert_server(&state, cometix_server).expect("edit Cometix definition");
+
+    McpService::sync_enabled_for_app(&state, &AppType::Claude)
+        .expect("project official MCP definitions");
+    McpService::sync_enabled_for_app(&state, &AppType::ClaudeCometix)
+        .expect("project Cometix MCP definitions");
+
+    let official: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&official_path).expect("read official MCP config"),
+    )
+    .expect("parse official MCP config");
+    let cometix: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cometix_path).expect("read Cometix MCP config"))
+            .expect("parse Cometix MCP config");
+
+    assert_eq!(
+        official.pointer("/mcpServers/shared/command"),
+        Some(&json!("official-command"))
+    );
+    assert_eq!(
+        cometix.pointer("/mcpServers/shared/command"),
+        Some(&json!("cometix-edited"))
+    );
+    for live in [&official, &cometix] {
+        let ids = live
+            .get("mcpServers")
+            .and_then(|value| value.as_object())
+            .expect("mcpServers object")
+            .keys();
+        assert!(
+            ids.into_iter()
+                .all(|id| !id.starts_with("cc-switch-scope:")),
+            "internal storage ids must never be written to a live config"
+        );
+    }
+}
+
+#[test]
+#[allow(deprecated)]
+fn deleting_official_same_id_keeps_cometix_database_and_live_definition() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let official_path = get_claude_mcp_path();
+    fs::write(
+        &official_path,
+        r#"{"mcpServers":{"shared":{"type":"stdio","command":"official"}}}"#,
+    )
+    .expect("seed official MCP config");
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    let cometix_path = cometix_dir.join(".claude.json");
+    fs::write(
+        &cometix_path,
+        r#"{"mcpServers":{"shared":{"type":"stdio","command":"cometix"}}}"#,
+    )
+    .expect("seed Cometix MCP config");
+
+    let state = create_test_state().expect("create test state");
+    McpService::import_from_claude(&state).expect("import official MCP config");
+    McpService::import_from_claude_cometix(&state).expect("import Cometix MCP config");
+
+    let official_storage_id = state
+        .db
+        .get_all_mcp_servers()
+        .expect("get stored MCP servers")
+        .into_values()
+        .find(|server| server.apps.claude)
+        .expect("find official server")
+        .id;
+    assert!(McpService::delete_server(&state, &official_storage_id)
+        .expect("delete official definition"));
+
+    assert!(
+        !McpService::get_servers(&state, AppType::Claude)
+            .expect("get official MCP servers")
+            .contains_key("shared"),
+        "official definition should be removed"
+    );
+    assert_eq!(
+        McpService::get_servers(&state, AppType::ClaudeCometix)
+            .expect("get Cometix MCP servers")
+            .get("shared")
+            .and_then(|spec| spec.get("command"))
+            .and_then(|value| value.as_str()),
+        Some("cometix"),
+        "Cometix database definition must survive official deletion"
+    );
+
+    let official: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&official_path).expect("read official MCP config"),
+    )
+    .expect("parse official MCP config");
+    let cometix: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cometix_path).expect("read Cometix MCP config"))
+            .expect("parse Cometix MCP config");
+    assert!(official.pointer("/mcpServers/shared").is_none());
+    assert_eq!(
+        cometix.pointer("/mcpServers/shared/command"),
+        Some(&json!("cometix"))
+    );
+}
+
+#[test]
+#[allow(deprecated)]
+fn cross_domain_toggle_keeps_same_id_rows_and_definitions_independent() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    fs::write(
+        get_claude_mcp_path(),
+        r#"{"mcpServers":{"shared":{"type":"stdio","command":"official"}}}"#,
+    )
+    .expect("seed official MCP config");
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    fs::write(
+        cometix_dir.join(".claude.json"),
+        r#"{"mcpServers":{"shared":{"type":"stdio","command":"cometix"}}}"#,
+    )
+    .expect("seed Cometix MCP config");
+
+    let state = create_test_state().expect("create test state");
+    McpService::import_from_claude(&state).expect("import official MCP config");
+    McpService::import_from_claude_cometix(&state).expect("import Cometix MCP config");
+
+    let stored = state
+        .db
+        .get_all_mcp_servers()
+        .expect("get stored MCP servers");
+    let official_id = stored
+        .values()
+        .find(|server| server.apps.claude)
+        .expect("find official row")
+        .id
+        .clone();
+    let cometix_id = stored
+        .values()
+        .find(|server| server.apps.claude_cometix)
+        .expect("find Cometix row")
+        .id
+        .clone();
+
+    McpService::toggle_app(&state, &official_id, AppType::ClaudeCometix, true)
+        .expect("enable Cometix from official row");
+    McpService::toggle_app(&state, &cometix_id, AppType::Claude, true)
+        .expect("enable official from Cometix row");
+
+    let stored = state
+        .db
+        .get_all_mcp_servers()
+        .expect("get stored MCP servers after toggles");
+    assert!(
+        !stored
+            .get(&official_id)
+            .expect("official row remains")
+            .apps
+            .claude_cometix,
+        "official storage row must never acquire the Cometix domain flag"
+    );
+    assert!(
+        !stored
+            .get(&cometix_id)
+            .expect("Cometix row remains")
+            .apps
+            .claude,
+        "Cometix storage row must never acquire the official domain flag"
+    );
+    assert_eq!(
+        McpService::get_servers(&state, AppType::Claude).expect("get official servers")["shared"]
+            ["command"],
+        json!("official")
+    );
+    assert_eq!(
+        McpService::get_servers(&state, AppType::ClaudeCometix).expect("get Cometix servers")
+            ["shared"]["command"],
+        json!("cometix")
+    );
+}
+
+#[test]
+fn non_claude_projection_arbitrates_same_live_id_without_cross_row_deletion() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    fs::write(
+        get_claude_mcp_path(),
+        r#"{"mcpServers":{"foo":{"type":"stdio","command":"official-command"}}}"#,
+    )
+    .expect("seed official MCP config");
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    fs::write(
+        cometix_dir.join(".claude.json"),
+        r#"{"mcpServers":{"foo":{"type":"stdio","command":"cometix-command"}}}"#,
+    )
+    .expect("seed Cometix MCP config");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create Codex config dir");
+    let codex_path = codex_dir.join("config.toml");
+    fs::write(&codex_path, "").expect("seed Codex config");
+
+    let state = create_test_state().expect("create test state");
+    McpService::import_from_claude(&state).expect("import official MCP config");
+    McpService::import_from_claude_cometix(&state).expect("import Cometix MCP config");
+
+    let mut rows = state.db.get_all_mcp_servers().expect("get stored MCP rows");
+    let official_id = rows
+        .values()
+        .find(|server| server.apps.claude)
+        .expect("official row")
+        .id
+        .clone();
+    let cometix_id = rows
+        .values()
+        .find(|server| server.apps.claude_cometix)
+        .expect("Cometix row")
+        .id
+        .clone();
+    for row in rows.values_mut() {
+        row.apps.codex = true;
+        state.db.save_mcp_server(row).expect("enable Codex in DB");
+    }
+
+    McpService::sync_enabled_for_app(&state, &AppType::Codex)
+        .expect("project same-id definitions to Codex");
+    let projected = fs::read_to_string(&codex_path).expect("read projected Codex config");
+    assert!(projected.contains("official-command"), "got: {projected}");
+    assert!(!projected.contains("cometix-command"), "got: {projected}");
+
+    McpService::toggle_app(&state, &cometix_id, AppType::Codex, false)
+        .expect("disable only the Cometix row for Codex");
+    let after_toggle = fs::read_to_string(&codex_path).expect("read Codex after toggle");
+    assert!(
+        after_toggle.contains("official-command"),
+        "disabling one storage row must not delete the enabled same-live-id row: {after_toggle}"
+    );
+
+    McpService::sync_enabled_for_app(&state, &AppType::Codex)
+        .expect("re-project Codex after one row is disabled");
+    let after_full_projection =
+        fs::read_to_string(&codex_path).expect("read Codex after full projection");
+    assert!(after_full_projection.contains("official-command"));
+    assert!(!after_full_projection.contains("cometix-command"));
+
+    McpService::toggle_app(&state, &cometix_id, AppType::Codex, true)
+        .expect("re-enable the Cometix row for Codex");
+    McpService::toggle_app(&state, &official_id, AppType::Codex, false)
+        .expect("disable only the official row for Codex");
+    let after_reverse_toggle =
+        fs::read_to_string(&codex_path).expect("read Codex after reverse toggle");
+    assert!(
+        after_reverse_toggle.contains("cometix-command"),
+        "the enabled scoped sibling must take ownership when raw is disabled: {after_reverse_toggle}"
+    );
+    assert!(!after_reverse_toggle.contains("official-command"));
+
+    McpService::sync_enabled_for_app(&state, &AppType::Codex)
+        .expect("re-project Codex with only Cometix enabled");
+    let after_reverse_projection =
+        fs::read_to_string(&codex_path).expect("read Codex after reverse full projection");
+    assert!(after_reverse_projection.contains("cometix-command"));
+    assert!(!after_reverse_projection.contains("official-command"));
+
+    let stored = state
+        .db
+        .get_all_mcp_servers()
+        .expect("get stored rows after toggle");
+    assert!(
+        !stored
+            .get(&official_id)
+            .expect("official remains")
+            .apps
+            .codex
+    );
+    assert!(stored.get(&cometix_id).expect("Cometix remains").apps.codex);
+}
+
+#[test]
+#[allow(deprecated)]
+fn editing_raw_official_row_to_cometix_only_removes_old_official_state() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+    fs::create_dir_all(home.join(".claude")).expect("create official Claude config dir");
+    fs::create_dir_all(home.join(".hlclaude")).expect("create Cometix config dir");
+
+    let state = create_test_state().expect("create test state");
+    let official = McpServer {
+        id: "foo".to_string(),
+        name: "foo".to_string(),
+        server: json!({ "type": "stdio", "command": "official-command" }),
+        apps: McpApps {
+            claude: true,
+            ..McpApps::default()
+        },
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+    McpService::upsert_server(&state, official.clone()).expect("create official row");
+
+    let mut cometix_only = official;
+    cometix_only.server = json!({ "type": "stdio", "command": "cometix-command" });
+    cometix_only.apps = McpApps {
+        claude_cometix: true,
+        ..McpApps::default()
+    };
+    McpService::upsert_server(&state, cometix_only).expect("move row to Cometix only");
+
+    let stored = state.db.get_all_mcp_servers().expect("get stored rows");
+    assert!(
+        stored.get("foo").is_none_or(|row| !row.apps.claude),
+        "the raw official row must be deleted or disabled"
+    );
+    assert!(!McpService::get_servers(&state, AppType::Claude)
+        .expect("get official MCP servers")
+        .contains_key("foo"));
+    assert_eq!(
+        McpService::get_servers(&state, AppType::ClaudeCometix).expect("get Cometix MCP servers")
+            ["foo"]["command"],
+        json!("cometix-command")
+    );
+
+    let official_live: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(get_claude_mcp_path()).expect("read official MCP live config"),
+    )
+    .expect("parse official MCP live config");
+    assert!(official_live.pointer("/mcpServers/foo").is_none());
 }
 
 #[test]

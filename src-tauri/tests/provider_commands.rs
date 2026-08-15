@@ -16,7 +16,7 @@ use support::{
 };
 
 fn settings_path(home: &Path) -> PathBuf {
-    home.join(".cc-switch").join("settings.json")
+    home.join(".cc-switch-cometix").join("settings.json")
 }
 
 fn grokbuild_config(name: &str, endpoint: &str, api_key: &str) -> String {
@@ -33,6 +33,43 @@ api_backend = "responses"
 context_window = 500000
 "#
     )
+}
+
+#[test]
+fn private_fork_command_boundary_rejects_claude_desktop_import_and_switch() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let state = create_test_state().expect("create test state");
+
+    let import_error = import_default_config_test_hook(&state, AppType::ClaudeDesktop)
+        .expect_err("Claude Desktop startup/manual import must be disabled");
+    assert!(import_error.to_string().contains("Claude Desktop"));
+
+    state
+        .db
+        .save_provider(
+            AppType::ClaudeDesktop.as_str(),
+            &Provider::with_id(
+                "legacy-desktop".to_string(),
+                "Legacy Desktop row".to_string(),
+                json!({"env": {"ANTHROPIC_API_KEY": "must-not-be-written"}}),
+                None,
+            ),
+        )
+        .expect("seed a cloned legacy DB row");
+
+    let switch_error = switch_provider_test_hook(&state, AppType::ClaudeDesktop, "legacy-desktop")
+        .expect_err("old DB rows must not bypass the Desktop write guard");
+    assert!(switch_error.to_string().contains("Claude Desktop"));
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::ClaudeDesktop.as_str())
+            .expect("query current Desktop provider"),
+        None,
+        "rejected switch must not mutate even the cloned DB current marker"
+    );
 }
 
 #[test]
@@ -598,7 +635,7 @@ fn switch_provider_updates_claude_live_and_state() {
     // 验证数据已持久化到数据库
     let home_dir = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
     let db_path = std::path::Path::new(&home_dir)
-        .join(".cc-switch")
+        .join(".cc-switch-cometix")
         .join("cc-switch.db");
     assert!(
         db_path.exists(),

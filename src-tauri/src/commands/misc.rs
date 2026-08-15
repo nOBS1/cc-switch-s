@@ -56,7 +56,7 @@ pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
     handle
         .opener()
         .open_url(
-            "https://github.com/farion1231/cc-switch/releases/latest",
+            "https://github.com/nOBS1/cc-switch-s/releases/latest",
             None::<String>,
         )
         .map_err(|e| format!("打开更新页面失败: {e}"))?;
@@ -142,34 +142,30 @@ fn claude_latest_version_source(tool: &str) -> Option<ClaudeLatestVersionSource>
     }
 }
 
-/// Lifecycle uses a distinct tool id for the Cometix distribution, while both
-/// distributions intentionally expose the same `claude` executable and share
-/// Claude Code's configuration files.
+/// Lifecycle uses a distinct tool id for the Cometix distribution. Its
+/// isolated launcher is `hlclaude`; official Claude remains `claude`.
 fn tool_executable_name(tool: &str) -> &str {
     match tool {
-        COMETIX_CLAUDE_TOOL => "claude",
+        COMETIX_CLAUDE_TOOL => "hlclaude",
         _ => tool,
     }
 }
 
-/// Build the command used by POSIX and WSL version probes. Claude's two npm
-/// distributions share a binary name, so the launcher target (or a small shim's
-/// contents) selects which virtual tool owns the result.
+/// Build the command used by POSIX and WSL version probes. Cometix has the
+/// isolated `hlclaude` launcher. Official `claude` still rejects a raw Cometix
+/// npm shim so the official card cannot claim the third-party distribution.
 fn tool_version_shell_command(tool: &str) -> String {
-    if !matches!(tool, "claude" | COMETIX_CLAUDE_TOOL) {
+    if tool == COMETIX_CLAUDE_TOOL {
+        return format!("{} --version", tool_executable_name(tool));
+    }
+    if tool != "claude" {
         return format!("{} --version", tool_executable_name(tool));
     }
 
-    let expected = if tool == COMETIX_CLAUDE_TOOL {
-        "cometix"
-    } else {
-        "official"
-    };
-    let script = format!(
-        "ccs_claude_path=$(command -v claude 2>/dev/null) || exit 127; \
+    let script = "ccs_claude_path=$(command -v claude 2>/dev/null) || exit 127; \
 ccs_claude_target=$(readlink \"$ccs_claude_path\" 2>/dev/null || true); \
 ccs_claude_dist=official; \
-ccs_claude_dir=${{ccs_claude_path%/*}}; \
+ccs_claude_dir=${ccs_claude_path%/*}; \
 if [ -x \"$ccs_claude_dir/volta\" ]; then \
   ccs_claude_dist=unknown; \
   ccs_claude_target=$(\"$ccs_claude_dir/volta\" which claude 2>/dev/null || true); \
@@ -177,9 +173,8 @@ if [ -x \"$ccs_claude_dir/volta\" ]; then \
 fi; \
 case \"$ccs_claude_path:$ccs_claude_target\" in *\"/@cometix/claude-code/\"*) ccs_claude_dist=cometix ;; esac; \
 if [ \"$ccs_claude_dist\" = official ] && grep -Fq \"@cometix/claude-code\" \"$ccs_claude_path\" 2>/dev/null; then ccs_claude_dist=cometix; fi; \
-[ \"$ccs_claude_dist\" = {expected} ] || exit 127; claude --version"
-    );
-    format!("sh -c {}", shell_single_quote(&script))
+[ \"$ccs_claude_dist\" = official ] || exit 127; claude --version";
+    format!("sh -c {}", shell_single_quote(script))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -264,9 +259,23 @@ pub async fn run_tool_lifecycle_action(
     // build 阶段含锚定探测（对每个工具跑 `--version` 定位命令行实际命中那处），
     // 与执行一并放进 blocking 线程，避免阻塞 async runtime。
     tokio::task::spawn_blocking(move || {
+        let includes_cometix = requested.contains(&COMETIX_CLAUDE_TOOL);
+        #[cfg(target_os = "windows")]
+        let ensure_native_cometix_launcher =
+            includes_cometix && wsl_distro_for_tool(COMETIX_CLAUDE_TOOL).is_none();
+        #[cfg(not(target_os = "windows"))]
+        let ensure_native_cometix_launcher = includes_cometix;
+
         let command_line =
             build_tool_lifecycle_command(&requested, action, wsl_shell_by_tool.as_ref())?;
-        run_tool_lifecycle_silently(&command_line, label)
+        run_tool_lifecycle_silently(&command_line, label)?;
+        if ensure_native_cometix_launcher {
+            ensure_cometix_launcher_at(
+                &crate::config::get_home_dir(),
+                &crate::config::get_claude_cometix_config_dir(),
+            )?;
+        }
+        Ok(())
     })
     .await
     .map_err(|e| format!("tool lifecycle task join error: {e}"))?
@@ -573,10 +582,60 @@ enum LifecycleCommandShell {
     WindowsBatch,
 }
 
+const COMETIX_LAUNCHER_MARKER: &str = "CC Switch Cometix managed hlclaude launcher v2";
+
+fn cometix_posix_launcher_content(config_dir: &Path) -> String {
+    let config_dir = shell_single_quote(&config_dir.to_string_lossy());
+    format!(
+        r#"#!/usr/bin/env sh
+# {COMETIX_LAUNCHER_MARKER}
+if [ -z "${{CLAUDE_CONFIG_DIR:-}}" ]; then
+  CLAUDE_CONFIG_DIR={config_dir}
+fi
+export CLAUDE_CONFIG_DIR
+export DISABLE_AUTOUPDATER=1
+exec node "${{HOME}}/.local/share/hlclaude/node_modules/@cometix/claude-code/cli.js" "$@"
+"#
+    )
+}
+
+fn cometix_windows_launcher_content(config_dir: &Path) -> String {
+    let config_dir = escape_windows_batch_value(&config_dir.to_string_lossy());
+    format!(
+        r#"@echo off
+rem {COMETIX_LAUNCHER_MARKER}
+setlocal DisableDelayedExpansion
+if not defined CLAUDE_CONFIG_DIR set "CLAUDE_CONFIG_DIR={config_dir}"
+set "DISABLE_AUTOUPDATER=1"
+node "%USERPROFILE%\.local\share\hlclaude\node_modules\@cometix\claude-code\cli.js" %*
+set "HLCLAUDE_EXIT_CODE=%ERRORLEVEL%"
+endlocal & exit /b %HLCLAUDE_EXIT_CODE%
+"#
+    )
+}
+
+fn cometix_launcher_is_managed(launcher: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(launcher) else {
+        return false;
+    };
+    if contents.contains(COMETIX_LAUNCHER_MARKER) {
+        return true;
+    }
+
+    let normalized = contents.replace('\\', "/");
+    (normalized.contains(r#"CLAUDE_CONFIG_DIR="${HOME}/.hlclaude""#)
+        && normalized
+            .contains("${HOME}/.local/share/hlclaude/node_modules/@cometix/claude-code/cli.js"))
+        || (normalized.contains("CLAUDE_CONFIG_DIR=%USERPROFILE%/.hlclaude")
+            && normalized.contains(
+                "%USERPROFILE%/.local/share/hlclaude/node_modules/@cometix/claude-code/cli.js",
+            ))
+}
+
 fn npm_install_command_for(tool: &str) -> Option<&'static str> {
     match tool {
         "claude" => Some("npm i -g @anthropic-ai/claude-code@latest"),
-        COMETIX_CLAUDE_TOOL => Some("npm i -g @cometix/claude-code@latest"),
+        COMETIX_CLAUDE_TOOL => None,
         "codex" => Some("npm i -g @openai/codex@latest"),
         "gemini" => Some("npm i -g @google/gemini-cli@latest"),
         "grok" => Some("npm i -g @xai-official/grok@latest"),
@@ -584,6 +643,76 @@ fn npm_install_command_for(tool: &str) -> Option<&'static str> {
         "openclaw" => Some("npm i -g openclaw@latest"),
         _ => None,
     }
+}
+
+fn cometix_npm_install_command_at(shell: LifecycleCommandShell, config_dir: &Path) -> String {
+    #[cfg(target_os = "windows")]
+    let translated_config_dir = if matches!(shell, LifecycleCommandShell::Posix) {
+        wsl_unc_path_to_linux(config_dir).map(PathBuf::from)
+    } else {
+        None
+    };
+    #[cfg(target_os = "windows")]
+    let config_dir = translated_config_dir.as_deref().unwrap_or(config_dir);
+
+    match shell {
+        LifecycleCommandShell::Posix => {
+            let launcher_content = shell_single_quote(&cometix_posix_launcher_content(config_dir));
+            let config_dir = shell_single_quote(&config_dir.to_string_lossy());
+            let marker = shell_single_quote(COMETIX_LAUNCHER_MARKER);
+            let legacy_config =
+                shell_single_quote(r#"export CLAUDE_CONFIG_DIR="${HOME}/.hlclaude""#);
+            let legacy_target = shell_single_quote(
+                r#"${HOME}/.local/share/hlclaude/node_modules/@cometix/claude-code/cli.js"#,
+            );
+            format!(
+                "npm install --prefix \"$HOME/.local/share/hlclaude\" {COMETIX_CLAUDE_PACKAGE}@latest && mkdir -p \"$HOME/.local/bin\" {config_dir} && if [ ! -e \"$HOME/.local/bin/hlclaude\" ] || grep -Fq {marker} \"$HOME/.local/bin/hlclaude\" 2>/dev/null || {{ grep -Fq {legacy_config} \"$HOME/.local/bin/hlclaude\" 2>/dev/null && grep -Fq {legacy_target} \"$HOME/.local/bin/hlclaude\" 2>/dev/null; }}; then printf '%s' {launcher_content} > \"$HOME/.local/bin/hlclaude\" && chmod +x \"$HOME/.local/bin/hlclaude\"; fi"
+            )
+        }
+        LifecycleCommandShell::WindowsBatch => {
+            let config_dir = escape_windows_batch_value(&config_dir.to_string_lossy());
+            format!(
+                "npm install --prefix \"%USERPROFILE%\\.local\\share\\hlclaude\" {COMETIX_CLAUDE_PACKAGE}@latest && if not exist \"{config_dir}\" mkdir \"{config_dir}\""
+            )
+        }
+    }
+}
+
+fn cometix_npm_install_command(shell: LifecycleCommandShell) -> String {
+    let config_dir = crate::config::get_claude_cometix_config_dir();
+    cometix_npm_install_command_at(shell, &config_dir)
+}
+
+fn ensure_cometix_launcher_at(home: &Path, config_dir: &Path) -> Result<(), String> {
+    let bin_dir = home.join(".local").join("bin");
+    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("创建 hlclaude 启动目录失败: {e}"))?;
+    std::fs::create_dir_all(config_dir).map_err(|e| format!("创建 hlclaude 配置目录失败: {e}"))?;
+
+    #[cfg(target_os = "windows")]
+    let launcher = bin_dir.join("hlclaude.cmd");
+    #[cfg(not(target_os = "windows"))]
+    let launcher = bin_dir.join("hlclaude");
+
+    if launcher.exists() && !cometix_launcher_is_managed(&launcher) {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    let content = cometix_windows_launcher_content(config_dir);
+
+    #[cfg(not(target_os = "windows"))]
+    let content = cometix_posix_launcher_content(config_dir);
+
+    std::fs::write(&launcher, content).map_err(|e| format!("写入 hlclaude 启动器失败: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("设置 hlclaude 启动器权限失败: {e}"))?;
+    }
+
+    Ok(())
 }
 
 fn official_update_args(tool: &str) -> Option<&'static str> {
@@ -620,6 +749,10 @@ fn tool_action_shell_command_for_shell(
     action: ToolLifecycleAction,
     shell: LifecycleCommandShell,
 ) -> Option<String> {
+    if tool == COMETIX_CLAUDE_TOOL {
+        return Some(cometix_npm_install_command(shell));
+    }
+
     // xAI's primary Windows distribution is the native PowerShell installer.
     // Keep npm as the network/policy fallback, matching the POSIX installer chain.
     #[cfg(target_os = "windows")]
@@ -1248,8 +1381,53 @@ fn build_exec_line(shell: &str, cwd: Option<&Path>) -> String {
 
 /// 构建 provider 命令行：通过用户 shell 的交互模式执行，确保 GUI 启动的终端也加载用户 PATH。
 #[cfg_attr(windows, allow(dead_code))]
-fn build_provider_command_line(shell: &str, config_path: &str, cwd: Option<&Path>) -> String {
-    let claude_command = format!("claude --settings {}", shell_single_quote(config_path));
+fn build_provider_command_line(
+    shell: &str,
+    executable: &str,
+    config_path: &str,
+    cwd: Option<&Path>,
+) -> String {
+    let cometix_config_dir =
+        (executable == "hlclaude").then(crate::config::get_claude_cometix_config_dir);
+    build_provider_command_line_at(
+        shell,
+        executable,
+        config_path,
+        cwd,
+        cometix_config_dir.as_deref(),
+    )
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn build_provider_command_line_at(
+    shell: &str,
+    executable: &str,
+    config_path: &str,
+    cwd: Option<&Path>,
+    cometix_config_dir: Option<&Path>,
+) -> String {
+    let executable = if executable == "hlclaude" {
+        // The isolated installer owns ~/.local/bin/hlclaude. Prepending that
+        // directory makes provider terminals work even when a GUI-launched
+        // shell inherited a narrower PATH. Set the active Cometix directory
+        // in the process environment before the CLI starts: `--settings`
+        // cannot select Claude's state directory early enough by itself.
+        let config_dir = cometix_config_dir
+            .map(|path| {
+                format!(
+                    "CLAUDE_CONFIG_DIR={} ",
+                    shell_single_quote(&path.to_string_lossy())
+                )
+            })
+            .unwrap_or_default();
+        format!(r#"{config_dir}PATH="$HOME/.local/bin:$PATH" {executable}"#)
+    } else {
+        executable.to_string()
+    };
+    let claude_command = format!(
+        "{executable} --settings {}",
+        shell_single_quote(config_path)
+    );
     let command = cwd
         .map(|dir| {
             format!(
@@ -2722,6 +2900,13 @@ fn package_manager_anchored_command_from_paths(
 ///    "那处 bin 目录的 npm"。
 #[cfg(not(target_os = "windows"))]
 fn anchored_command_from_paths(tool: &str, bin_path: &str, real_target: &str) -> Option<String> {
+    if tool == COMETIX_CLAUDE_TOOL {
+        // The package's declared bin is `claude`. Any global package-manager
+        // update can therefore replace the official launcher. Cometix is
+        // always anchored to its dedicated prefix instead.
+        return Some(cometix_npm_install_command(LifecycleCommandShell::Posix));
+    }
+
     let real_lower = real_target.to_ascii_lowercase();
 
     if tool == "hermes" {
@@ -2811,6 +2996,14 @@ fn package_manager_anchored_command_from_paths(tool: &str, bin_path: &str) -> Op
 /// 才返 None 让上游兜回静态命令、`anchored=false`。
 #[cfg(target_os = "windows")]
 fn anchored_command_from_paths(tool: &str, bin_path: &str, real_target: &str) -> Option<String> {
+    if tool == COMETIX_CLAUDE_TOOL {
+        // See the POSIX branch: never let the raw package register its global
+        // `claude` bin alongside the official distribution.
+        return Some(cometix_npm_install_command(
+            LifecycleCommandShell::WindowsBatch,
+        ));
+    }
+
     if tool == "hermes" {
         return anchored_official_update_command(tool, bin_path);
     }
@@ -3211,7 +3404,7 @@ fn build_wsl_env_argv(extra_env: &[(&str, String)]) -> Result<Vec<String>, Strin
             return Err(format!("invalid env for {key}"));
         }
 
-        let linux_value = if *key == "OPENCODE_CONFIG_DIR" {
+        let linux_value = if matches!(*key, "OPENCODE_CONFIG_DIR" | "CLAUDE_CONFIG_DIR") {
             let Some(value) = wsl_unc_path_to_linux(Path::new(value)) else {
                 continue;
             };
@@ -3233,12 +3426,18 @@ fn build_wsl_tool_command(
     args: &[&str],
     deadline: Option<CommandDeadline>,
 ) -> Result<String, String> {
-    let invocation = std::iter::once(tool)
+    let executable = tool_executable_name(tool);
+    let invocation = std::iter::once(executable)
         .chain(args.iter().copied())
         .collect::<Vec<_>>()
         .join(" ");
+    let path_setup = if tool == COMETIX_CLAUDE_TOOL {
+        r#"PATH="$HOME/.local/bin:$PATH"; "#
+    } else {
+        ""
+    };
     let command = format!(
-        "for flag in -lic -lc -c; do if \"${{SHELL:-sh}}\" \"$flag\" 'command -v {tool}' >/dev/null 2>&1; then exec \"${{SHELL:-sh}}\" \"$flag\" '{invocation}'; fi; done; exit 127"
+        "{path_setup}for flag in -lic -lc -c; do if \"${{SHELL:-sh}}\" \"$flag\" 'command -v {executable}' >/dev/null 2>&1; then exec \"${{SHELL:-sh}}\" \"$flag\" '{invocation}'; fi; done; exit 127"
     );
 
     let Some(deadline) = deadline else {
@@ -3376,6 +3575,11 @@ fn installer_with_npm_fallback(installer: &str, tool: &str) -> String {
 fn posix_install_command_for(tool: &str) -> String {
     match tool {
         "claude" => installer_with_npm_fallback(CLAUDE_INSTALL_UNIX, tool),
+        // Windows hosts reach this branch for WSL installs as well. Generate
+        // the POSIX launcher command explicitly so a UNC Cometix override is
+        // translated into the distro path instead of leaking Windows batch
+        // syntax across the `wsl.exe` boundary.
+        COMETIX_CLAUDE_TOOL => cometix_npm_install_command(LifecycleCommandShell::Posix),
         // Grok 的 npm fallback **会切换用户的分发模式**（该包 postinstall 把
         // `~/.grok/config.toml` 的 `[cli] installer` 写成 `npm`，此后 `grok update` 一律走
         // npm、隐式依赖 node）。仍然保留它：官方 installer 不可达（防火墙 / x.ai 被拦）时
@@ -3489,7 +3693,8 @@ pub async fn probe_tool_installations(
 #[cfg(target_os = "windows")]
 fn wsl_distro_for_tool(tool: &str) -> Option<String> {
     let override_dir = match tool {
-        "claude" | COMETIX_CLAUDE_TOOL => crate::settings::get_claude_override_dir(),
+        "claude" => crate::settings::get_claude_override_dir(),
+        COMETIX_CLAUDE_TOOL => crate::settings::get_claude_cometix_override_dir(),
         "codex" => crate::settings::get_codex_override_dir(),
         "gemini" => crate::settings::get_gemini_override_dir(),
         "grok" => crate::settings::get_grok_override_dir(),
@@ -3531,6 +3736,13 @@ fn wsl_distro_from_path(path: &Path) -> Option<String> {
 ///
 /// 根据提供商配置的环境变量启动一个带有该提供商特定设置的终端
 /// 无需检查是否为当前激活的提供商，任何提供商都可以打开终端
+fn provider_cli_executable(app_type: &AppType) -> &'static str {
+    match app_type {
+        AppType::ClaudeCometix => "hlclaude",
+        _ => "claude",
+    }
+}
+
 #[allow(non_snake_case)]
 #[tauri::command]
 pub async fn open_provider_terminal(
@@ -3555,8 +3767,13 @@ pub async fn open_provider_terminal(
     let env_vars = extract_env_vars_from_config(config, &app_type);
 
     // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
-    launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref())
-        .map_err(|e| format!("启动终端失败: {e}"))?;
+    launch_terminal_with_env(
+        env_vars,
+        &providerId,
+        launch_cwd.as_deref(),
+        provider_cli_executable(&app_type),
+    )
+    .map_err(|e| format!("启动终端失败: {e}"))?;
 
     Ok(true)
 }
@@ -3675,6 +3892,7 @@ fn launch_terminal_with_env(
     env_vars: Vec<(String, String)>,
     provider_id: &str,
     cwd: Option<&Path>,
+    executable: &str,
 ) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
     let config_file = temp_dir.join(format!(
@@ -3688,19 +3906,19 @@ fn launch_terminal_with_env(
 
     #[cfg(target_os = "macos")]
     {
-        launch_macos_terminal(&config_file, cwd)?;
+        launch_macos_terminal(&config_file, cwd, executable)?;
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     {
-        launch_linux_terminal(&config_file, cwd)?;
+        launch_linux_terminal(&config_file, cwd, executable)?;
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
     {
-        launch_windows_terminal(&temp_dir, &config_file, cwd)?;
+        launch_windows_terminal(&temp_dir, &config_file, cwd, executable)?;
         Ok(())
     }
 
@@ -3730,7 +3948,11 @@ fn write_claude_config(
 
 /// macOS: 根据用户首选终端启动
 #[cfg(target_os = "macos")]
-fn launch_macos_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> Result<(), String> {
+fn launch_macos_terminal(
+    config_file: &std::path::Path,
+    cwd: Option<&Path>,
+    executable: &str,
+) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
     let preferred = crate::settings::get_preferred_terminal();
@@ -3743,7 +3965,7 @@ fn launch_macos_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> R
     let temp_dir = std::env::temp_dir();
     let script_file = temp_dir.join(format!("cc_switch_launcher_{}.sh", std::process::id()));
     let config_path = config_file.to_string_lossy();
-    let provider_command = build_provider_command_line(&shell, &config_path, cwd);
+    let provider_command = build_provider_command_line(&shell, executable, &config_path, cwd);
 
     // Write the shell script to a temp file
     // 脚本使用 POSIX sh 语法确保可移植性，exec 行切换到用户交互式 shell
@@ -4050,7 +4272,11 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
 
 /// Linux: 根据用户首选终端启动
 #[cfg(target_os = "linux")]
-fn launch_linux_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> Result<(), String> {
+fn launch_linux_terminal(
+    config_file: &std::path::Path,
+    cwd: Option<&Path>,
+    executable: &str,
+) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
@@ -4076,7 +4302,7 @@ fn launch_linux_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> R
     let temp_dir = std::env::temp_dir();
     let script_file = temp_dir.join(format!("cc_switch_launcher_{}.sh", std::process::id()));
     let config_path = config_file.to_string_lossy();
-    let provider_command = build_provider_command_line(&shell, &config_path, cwd);
+    let provider_command = build_provider_command_line(&shell, executable, &config_path, cwd);
 
     let script_content = format!(
         r#"#!/usr/bin/env sh
@@ -4167,32 +4393,79 @@ fn which_command(cmd: &str) -> bool {
 
 /// Windows: 根据用户首选终端启动
 #[cfg(target_os = "windows")]
+fn build_windows_provider_batch(
+    executable: &str,
+    config_file: &std::path::Path,
+    cwd: Option<&Path>,
+) -> String {
+    let cometix_config_dir =
+        (executable == "hlclaude").then(crate::config::get_claude_cometix_config_dir);
+    build_windows_provider_batch_at(executable, config_file, cwd, cometix_config_dir.as_deref())
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_provider_batch_at(
+    executable: &str,
+    config_file: &std::path::Path,
+    cwd: Option<&Path>,
+    cometix_config_dir: Option<&Path>,
+) -> String {
+    let config_path_for_batch = escape_windows_batch_value(&config_file.to_string_lossy());
+    let cwd_command = build_windows_cwd_command(cwd);
+    let path_setup = if executable == "hlclaude" {
+        "set \"PATH=%USERPROFILE%\\.local\\bin;%PATH%\"\n"
+    } else {
+        ""
+    };
+    let config_dir_setup = if executable == "hlclaude" {
+        cometix_config_dir
+            .map(|path| {
+                format!(
+                    "set \"CLAUDE_CONFIG_DIR={}\"\n",
+                    escape_windows_batch_value(&path.to_string_lossy())
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    // `hlclaude` is a managed .cmd launcher. A batch file must use `call`
+    // when invoking another batch file or control never returns for cleanup.
+    // Keep the established official-Claude invocation unchanged.
+    let provider_invocation = if executable == "hlclaude" {
+        "call hlclaude"
+    } else {
+        executable
+    };
+
+    format!(
+        "@echo off
+{cwd_command}
+{path_setup}
+{config_dir_setup}
+echo Using provider-specific claude config:
+echo {}
+{provider_invocation} --settings \"{}\"
+del \"{}\" >nul 2>&1
+del \"%~f0\" >nul 2>&1
+",
+        config_path_for_batch, config_path_for_batch, config_path_for_batch,
+    )
+}
+
+/// Windows: 根据用户首选终端启动
+#[cfg(target_os = "windows")]
 fn launch_windows_terminal(
     temp_dir: &std::path::Path,
     config_file: &std::path::Path,
     cwd: Option<&Path>,
+    executable: &str,
 ) -> Result<(), String> {
     let preferred = crate::settings::get_preferred_terminal();
     let terminal = preferred.as_deref().unwrap_or("cmd");
 
     let bat_file = temp_dir.join(format!("cc_switch_claude_{}.bat", std::process::id()));
-    let config_path_for_batch = escape_windows_batch_value(&config_file.to_string_lossy());
-    let cwd_command = build_windows_cwd_command(cwd);
-
-    let content = format!(
-        "@echo off
-{cwd_command}
-echo Using provider-specific claude config:
-echo {}
-claude --settings \"{}\"
-del \"{}\" >nul 2>&1
-del \"%~f0\" >nul 2>&1
-",
-        config_path_for_batch,
-        config_path_for_batch,
-        config_path_for_batch,
-        cwd_command = cwd_command,
-    );
+    let content = build_windows_provider_batch(executable, config_file, cwd);
 
     std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
 
@@ -4502,6 +4775,10 @@ mod tests {
                 "OPENCODE_CONFIG_DIR",
                 r"\\wsl$\Ubuntu\home\Jane Doe\.config\opencode".to_string(),
             ),
+            (
+                "CLAUDE_CONFIG_DIR",
+                r"\\wsl$\Ubuntu\home\Jane Doe\.hlclaude-custom".to_string(),
+            ),
             ("OPENCODE_DISABLE_PROJECT_CONFIG", "true".to_string()),
         ];
 
@@ -4509,9 +4786,23 @@ mod tests {
             build_wsl_env_argv(&extra_env).unwrap(),
             vec![
                 "OPENCODE_CONFIG_DIR=/home/Jane Doe/.config/opencode".to_string(),
+                "CLAUDE_CONFIG_DIR=/home/Jane Doe/.hlclaude-custom".to_string(),
                 "OPENCODE_DISABLE_PROJECT_CONFIG=true".to_string(),
             ]
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cometix_wsl_install_translates_custom_config_dir_into_distro_path() {
+        let command = cometix_npm_install_command_at(
+            LifecycleCommandShell::Posix,
+            Path::new(r"\\wsl$\Ubuntu\home\Jane Doe\.hlclaude-custom"),
+        );
+
+        assert!(command.contains("'/home/Jane Doe/.hlclaude-custom'"));
+        assert!(!command.contains(r"\\wsl$"));
+        assert!(!command.contains("%USERPROFILE%"));
     }
 
     #[cfg(target_os = "windows")]
@@ -4562,12 +4853,13 @@ mod tests {
     #[test]
     fn test_build_provider_command_line_uses_user_shell_environment() {
         assert_eq!(
-            build_provider_command_line("/bin/zsh", "/tmp/claude config.json", None),
+            build_provider_command_line("/bin/zsh", "claude", "/tmp/claude config.json", None),
             "'/bin/zsh' -lic 'claude --settings '\"'\"'/tmp/claude config.json'\"'\"''"
         );
         assert_eq!(
             build_provider_command_line(
                 "/bin/bash",
+                "claude",
                 "/tmp/claude config.json",
                 Some(Path::new("/tmp/project"))
             ),
@@ -4576,11 +4868,55 @@ mod tests {
         assert_eq!(
             build_provider_command_line(
                 "/bin/sh",
+                "claude",
                 "/tmp/claude config.json",
                 Some(Path::new("/tmp/project O'Brien"))
             ),
             r#"'/bin/sh' -c 'cd '"'"'/tmp/project O'"'"'"'"'"'"'"'"'Brien'"'"' && claude --settings '"'"'/tmp/claude config.json'"'"''"#
         );
+        assert_eq!(
+            build_provider_command_line_at(
+                "/bin/zsh",
+                "hlclaude",
+                "/tmp/cometix settings.json",
+                None,
+                Some(Path::new("/profiles/Cometix Config")),
+            ),
+            r#"'/bin/zsh' -lic 'CLAUDE_CONFIG_DIR='"'"'/profiles/Cometix Config'"'"' PATH="$HOME/.local/bin:$PATH" hlclaude --settings '"'"'/tmp/cometix settings.json'"'"''"#
+        );
+    }
+
+    #[test]
+    fn provider_terminal_selects_distribution_specific_launcher() {
+        assert_eq!(provider_cli_executable(&AppType::Claude), "claude");
+        assert_eq!(provider_cli_executable(&AppType::ClaudeCometix), "hlclaude");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_provider_batch_uses_distribution_specific_launcher() {
+        let config = Path::new(r"C:\Temp\provider settings.json");
+
+        let cometix = build_windows_provider_batch_at(
+            "hlclaude",
+            config,
+            None,
+            Some(Path::new(r"C:\Profiles\Cometix Config")),
+        );
+        assert!(cometix.contains(r#"set "PATH=%USERPROFILE%\.local\bin;%PATH%""#));
+        assert!(cometix.contains(r#"set "CLAUDE_CONFIG_DIR=C:\Profiles\Cometix Config""#));
+        assert!(cometix.contains("call hlclaude --settings"));
+        assert!(!cometix.contains("\nclaude --settings"));
+
+        let official = build_windows_provider_batch_at(
+            "claude",
+            config,
+            None,
+            Some(Path::new(r"C:\Profiles\Must Be Ignored")),
+        );
+        assert!(official.contains("\nclaude --settings"));
+        assert!(!official.contains("hlclaude --settings"));
+        assert!(!official.contains("CLAUDE_CONFIG_DIR"));
     }
 
     #[test]
@@ -4702,7 +5038,7 @@ mod tests {
             normalize_requested_tools(&requested),
             vec!["claude", "claude-cometix"]
         );
-        assert_eq!(tool_executable_name("claude-cometix"), "claude");
+        assert_eq!(tool_executable_name("claude-cometix"), "hlclaude");
         assert_eq!(tool_display_name("claude"), "Claude Code");
         assert_eq!(tool_display_name("claude-cometix"), "Claude Code (Cometix)");
         assert_eq!(npm_package_for("claude"), Some("@anthropic-ai/claude-code"));
@@ -4710,29 +5046,90 @@ mod tests {
             npm_package_for("claude-cometix"),
             Some("@cometix/claude-code")
         );
-        assert_eq!(
-            npm_install_command_for("claude-cometix"),
-            Some("npm i -g @cometix/claude-code@latest")
-        );
+        assert_eq!(npm_install_command_for("claude-cometix"), None);
         assert_eq!(official_update_args("claude-cometix"), None);
-        assert_eq!(
-            tool_action_shell_command_for_shell(
-                "claude-cometix",
-                ToolLifecycleAction::Install,
-                LifecycleCommandShell::Posix,
-            )
-            .as_deref(),
-            Some("npm i -g @cometix/claude-code@latest")
+        for (shell, isolated_prefix) in [
+            (LifecycleCommandShell::Posix, "$HOME/.local/share/hlclaude"),
+            (
+                LifecycleCommandShell::WindowsBatch,
+                r"%USERPROFILE%\.local\share\hlclaude",
+            ),
+        ] {
+            for action in [ToolLifecycleAction::Install, ToolLifecycleAction::Update] {
+                let command = tool_action_shell_command_for_shell("claude-cometix", action, shell)
+                    .expect("Cometix npm lifecycle command");
+                assert!(command.contains("@cometix/claude-code@latest"));
+                assert!(command.contains(isolated_prefix));
+                assert!(!command.contains(" -g "));
+                assert!(!command.contains("@anthropic-ai/claude-code"));
+                assert!(!command.contains("claude update"));
+            }
+        }
+    }
+
+    #[test]
+    fn cometix_posix_lifecycle_creates_an_isolated_launcher_without_overwriting_it() {
+        let command = cometix_npm_install_command_at(
+            LifecycleCommandShell::Posix,
+            Path::new("/home/test/.hlclaude"),
         );
-        assert_eq!(
-            tool_action_shell_command_for_shell(
-                "claude-cometix",
-                ToolLifecycleAction::Update,
-                LifecycleCommandShell::Posix,
-            )
-            .as_deref(),
-            Some("npm i -g @cometix/claude-code@latest")
+
+        assert!(command.contains("$HOME/.local/bin/hlclaude"));
+        assert!(command.contains("CLAUDE_CONFIG_DIR"));
+        assert!(command.contains("/home/test/.hlclaude"));
+        assert!(command.contains("DISABLE_AUTOUPDATER"));
+        assert!(command.contains("[ ! -e"));
+        assert!(command.contains("chmod +x"));
+        assert!(!command.contains("npm i -g"));
+    }
+
+    #[test]
+    fn cometix_posix_lifecycle_uses_custom_config_dir_and_preserves_caller_env() {
+        let command = cometix_npm_install_command_at(
+            LifecycleCommandShell::Posix,
+            Path::new("/profiles/Cometix Config"),
         );
+
+        assert!(command.contains("'/profiles/Cometix Config'"));
+        assert!(command.contains(r#"if [ -z "${CLAUDE_CONFIG_DIR:-}" ]"#));
+        assert!(command.contains(r#"CLAUDE_CONFIG_DIR='"'"'/profiles/Cometix Config'"'"'"#));
+        assert!(command.contains("export CLAUDE_CONFIG_DIR"));
+    }
+
+    #[test]
+    fn cometix_provider_command_exports_custom_config_dir_before_launcher_runs() {
+        let command = build_provider_command_line_at(
+            "/bin/sh",
+            "hlclaude",
+            "/tmp/provider.json",
+            None,
+            Some(Path::new("/profiles/Cometix Config")),
+        );
+
+        assert!(command.contains("CLAUDE_CONFIG_DIR="));
+        assert!(command.contains("/profiles/Cometix Config"));
+        assert!(command.contains("hlclaude --settings"));
+        assert!(!command.contains(" PATH=\"$HOME/.local/bin:$PATH\" claude --settings"));
+    }
+
+    #[test]
+    fn legacy_generated_cometix_launcher_is_managed_but_custom_launcher_is_not() {
+        let temp = tempfile::tempdir().expect("temp launcher dir");
+        let launcher = temp.path().join("hlclaude");
+        std::fs::write(
+            &launcher,
+            r#"#!/usr/bin/env sh
+export CLAUDE_CONFIG_DIR="${HOME}/.hlclaude"
+export DISABLE_AUTOUPDATER=1
+exec node "${HOME}/.local/share/hlclaude/node_modules/@cometix/claude-code/cli.js" "$@"
+"#,
+        )
+        .expect("write legacy launcher");
+        assert!(cometix_launcher_is_managed(&launcher));
+
+        std::fs::write(&launcher, "#!/usr/bin/env sh\necho custom\n")
+            .expect("write custom launcher");
+        assert!(!cometix_launcher_is_managed(&launcher));
     }
 
     #[test]
@@ -4791,28 +5188,72 @@ mod tests {
 
     #[test]
     fn claude_shell_probe_unwraps_volta_shims() {
-        let command = tool_version_shell_command("claude-cometix");
+        let command = tool_version_shell_command("claude");
         assert!(command.starts_with("sh -c "));
         assert!(command.contains("volta\" which claude"));
         assert!(command.contains("ccs_claude_dist=unknown"));
     }
 
     #[test]
-    fn cometix_windows_npm_launcher_is_detected_from_contents() {
+    fn cometix_shell_probe_uses_isolated_launcher() {
+        assert_eq!(
+            tool_version_shell_command("claude-cometix"),
+            "hlclaude --version"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cometix_windows_hlclaude_launcher_is_detected_from_contents() {
         let temp = tempfile::tempdir().expect("temp dir should be created");
-        let launcher = temp.path().join("claude.cmd");
+        let launcher = temp.path().join("hlclaude.cmd");
         std::fs::write(
             &launcher,
-            r#"@\"%~dp0\node.exe\" \"%~dp0\node_modules\@cometix\claude-code\cli.js\" %*"#,
+            r#"@echo off
+set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.hlclaude"
+"%~dp0..\share\hlclaude\runtime\node.exe" "%~dp0..\share\hlclaude\node_modules\@cometix\claude-code\cli.js" %*"#,
         )
         .expect("launcher fixture should be written");
 
+        assert_eq!(
+            tool_executable_candidates("claude-cometix", temp.path()),
+            vec![launcher.clone(), temp.path().join("hlclaude.exe")]
+        );
         assert!(tool_installation_matches(
             "claude-cometix",
             &launcher,
             &launcher
         ));
         assert!(!tool_installation_matches("claude", &launcher, &launcher));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cometix_npm_install_creates_launcher_without_overwriting_existing_one() {
+        let home = tempfile::tempdir().expect("temp home");
+        let launcher = home.path().join(".local").join("bin").join("hlclaude.cmd");
+        let config_dir = home.path().join("Cometix Profile");
+
+        ensure_cometix_launcher_at(home.path(), &config_dir).expect("create Cometix launcher");
+        let generated = std::fs::read_to_string(&launcher).expect("read generated launcher");
+        assert!(generated.contains("if not defined CLAUDE_CONFIG_DIR"));
+        assert!(generated.contains(&config_dir.to_string_lossy().to_string()));
+        assert!(generated.contains(r#"@cometix\claude-code\cli.js"#));
+
+        let updated_config_dir = home.path().join("Updated Cometix Profile");
+        ensure_cometix_launcher_at(home.path(), &updated_config_dir)
+            .expect("refresh managed Cometix launcher");
+        let updated = std::fs::read_to_string(&launcher).expect("read updated launcher");
+        assert!(updated.contains(&updated_config_dir.to_string_lossy().to_string()));
+        assert!(!updated.contains(&config_dir.to_string_lossy().to_string()));
+
+        std::fs::write(&launcher, "existing custom launcher").expect("seed custom launcher");
+        ensure_cometix_launcher_at(home.path(), &home.path().join("Other Profile"))
+            .expect("preserve Cometix launcher");
+        assert_eq!(
+            std::fs::read_to_string(&launcher).expect("read preserved launcher"),
+            "existing custom launcher"
+        );
     }
 
     #[test]
@@ -4831,7 +5272,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn cometix_windows_upgrade_stays_on_cometix_package() {
+    fn cometix_windows_anchored_upgrade_stays_on_isolated_prefix() {
         let temp = tempfile::tempdir().expect("temp dir should be created");
         let launcher = temp.path().join("claude.cmd");
         let npm = temp.path().join("npm.cmd");
@@ -4843,21 +5284,25 @@ mod tests {
             &launcher.to_string_lossy(),
             &launcher.to_string_lossy(),
         )
-        .expect("Cometix install should anchor to sibling npm");
+        .expect("Cometix upgrade command");
         assert!(command.contains("@cometix/claude-code@latest"));
+        assert!(command.contains(r#"%USERPROFILE%\.local\share\hlclaude"#));
+        assert!(!command.contains(" -g "));
         assert!(!command.contains("@anthropic-ai/claude-code"));
     }
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn cometix_posix_upgrade_stays_on_cometix_package() {
+    fn cometix_posix_anchored_upgrade_stays_on_isolated_prefix() {
         let command = anchored_command_from_paths(
             "claude-cometix",
             "/home/me/.nvm/versions/node/v22/bin/claude",
             "/home/me/.nvm/versions/node/v22/lib/node_modules/@cometix/claude-code/cli.js",
         )
-        .expect("Cometix install should anchor to sibling npm");
+        .expect("Cometix upgrade command");
         assert!(command.contains("@cometix/claude-code@latest"));
+        assert!(command.contains("$HOME/.local/share/hlclaude"));
+        assert!(!command.contains(" -g "));
         assert!(!command.contains("@anthropic-ai/claude-code"));
         assert!(!command.contains("claude update"));
     }
@@ -5499,6 +5944,16 @@ mod tests {
                 cmd,
                 "claude update || npm i -g @anthropic-ai/claude-code@latest"
             );
+        }
+
+        #[test]
+        fn wsl_cometix_invocation_uses_hlclaude_not_the_virtual_tool_id() {
+            let command = build_wsl_tool_command(COMETIX_CLAUDE_TOOL, &["--version"], None)
+                .expect("build Cometix WSL command");
+
+            assert!(command.contains("command -v hlclaude"));
+            assert!(command.contains("hlclaude --version"));
+            assert!(!command.contains("command -v claude-cometix"));
         }
     }
 

@@ -70,6 +70,19 @@ export interface UnifiedSkillsPanelHandle {
   checkUpdates: () => void;
 }
 
+const OFFICIAL_CLAUDE_SKILL_ID_PREFIX = "cc-switch-scope:v1:claude:";
+const COMETIX_CLAUDE_SKILL_ID_PREFIX = "cc-switch-scope:v1:claude-cometix:";
+
+function scopedSkillSupportsApp(skill: InstalledSkill, app: AppId): boolean {
+  if (skill.id.startsWith(OFFICIAL_CLAUDE_SKILL_ID_PREFIX)) {
+    return app !== "claude-cometix";
+  }
+  if (skill.id.startsWith(COMETIX_CLAUDE_SKILL_ID_PREFIX)) {
+    return app !== "claude";
+  }
+  return true;
+}
+
 function formatSkillBackupDate(unixSeconds: number): string {
   const date = new Date(unixSeconds * 1000);
   return Number.isNaN(date.getTime())
@@ -275,7 +288,11 @@ const UnifiedSkillsPanel = React.forwardRef<
     if (!skills || !beginWrite()) return;
 
     const ids = skills
-      .filter((skill) => Boolean(skill.apps[app]) !== enabled)
+      .filter(
+        (skill) =>
+          scopedSkillSupportsApp(skill, app) &&
+          Boolean(skill.apps[app]) !== enabled,
+      )
       .map((skill) => skill.id);
     if (ids.length === 0) {
       endWrite();
@@ -770,6 +787,10 @@ const InstalledSkillListItem: React.FC<InstalledSkillListItemProps> = ({
     }
     return t("skills.local");
   }, [skill.repoOwner, skill.repoName, t]);
+  const compatibleAppIds = useMemo(
+    () => SKILLS_APP_IDS.filter((app) => scopedSkillSupportsApp(skill, app)),
+    [skill],
+  );
 
   return (
     <ListItemRow isLast={isLast}>
@@ -812,7 +833,7 @@ const InstalledSkillListItem: React.FC<InstalledSkillListItemProps> = ({
       <AppToggleGroup
         apps={skill.apps}
         onToggle={(app, enabled) => onToggleApp(skill.id, app, enabled)}
-        appIds={SKILLS_APP_IDS}
+        appIds={compatibleAppIds}
         disabled={actionsDisabled}
       />
 
@@ -1014,6 +1035,7 @@ const ImportSkillsDialog: React.FC<ImportSkillsDialogProps> = ({
         skill.directory,
         {
           claude: skill.foundIn.includes("claude"),
+          "claude-cometix": skill.foundIn.includes("claude-cometix"),
           codex: skill.foundIn.includes("codex"),
           gemini: skill.foundIn.includes("gemini"),
           grokbuild: skill.foundIn.includes("grokbuild"),
@@ -1041,6 +1063,7 @@ const ImportSkillsDialog: React.FC<ImportSkillsDialogProps> = ({
         directory,
         apps: selectedApps[directory] ?? {
           claude: false,
+          "claude-cometix": false,
           codex: false,
           gemini: false,
           grokbuild: false,

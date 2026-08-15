@@ -7,6 +7,7 @@ import { ProviderIcon } from "@/components/ProviderIcon";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import type { VisibleApps } from "@/types";
 import type { AppId } from "@/lib/api/types";
+import { isManagementApp } from "@/utils/forkPolicy";
 
 interface AppVisibilitySettingsProps {
   settings: SettingsFormState;
@@ -23,11 +24,6 @@ const APP_CONFIG: Array<{
     id: "claude-cometix",
     icon: "claude",
     nameKey: "apps.claudeCometix",
-  },
-  {
-    id: "claude-desktop",
-    icon: "claude",
-    nameKey: "apps.claudeDesktop",
   },
   { id: "codex", icon: "openai", nameKey: "apps.codex" },
   { id: "gemini", icon: "gemini", nameKey: "apps.gemini" },
@@ -46,7 +42,6 @@ export function AppVisibilitySettings({
   const visibleApps: VisibleApps = {
     claude: true,
     "claude-cometix": true,
-    "claude-desktop": true,
     codex: true,
     gemini: true,
     grokbuild: true,
@@ -54,10 +49,13 @@ export function AppVisibilitySettings({
     openclaw: true,
     hermes: true,
     ...settings.visibleApps,
+    "claude-desktop": false,
   };
 
   // Count how many apps are currently visible
-  const visibleCount = Object.values(visibleApps).filter(Boolean).length;
+  const visibleCount = APP_CONFIG.filter(
+    (app) => isManagementApp(app.id) && visibleApps[app.id],
+  ).length;
 
   const handleToggle = (appId: AppId) => {
     const isCurrentlyVisible = visibleApps[appId];
@@ -83,7 +81,7 @@ export function AppVisibilitySettings({
         </p>
       </header>
       <div className="flex flex-wrap gap-1 rounded-md border border-border-default bg-background p-1">
-        {APP_CONFIG.map((app) => {
+        {APP_CONFIG.filter((app) => isManagementApp(app.id)).map((app) => {
           const isVisible = visibleApps[app.id];
           // Disable button if this is the last visible app
           const isDisabled = isVisible && visibleCount <= 1;

@@ -8,6 +8,7 @@ vi.mock("react-i18next", () => ({
       ({
         "apps.claudeCode": "Claude Code",
         "apps.claudeCometix": "Claude Code（Cometix）",
+        "apps.claudeDesktop": "Claude Desktop",
       })[key] ?? key,
   }),
 }));
@@ -22,5 +23,8 @@ describe("AppSwitcher", () => {
     expect(
       screen.getByRole("button", { name: "Claude Code" }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Claude Desktop" }),
+    ).not.toBeInTheDocument();
   });
 });

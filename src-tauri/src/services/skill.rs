@@ -1,7 +1,7 @@
 //! Skills 服务层
 //!
 //! v3.10.0+ 统一管理架构：
-//! - SSOT（单一事实源）：`~/.cc-switch/skills/`
+//! - SSOT（单一事实源）：`~/.cc-switch-cometix/skills/`
 //! - 安装时下载到 SSOT，按需同步到各应用目录
 //! - 数据库存储安装记录和启用状态
 
@@ -39,7 +39,7 @@ pub enum SyncMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillStorageLocation {
-    /// CC Switch 管理目录 (~/.cc-switch/skills/)
+    /// CC Switch Cometix 管理目录 (~/.cc-switch-cometix/skills/)
     #[default]
     CcSwitch,
     /// Agent Skills 统一标准目录 (~/.agents/skills/)
@@ -308,6 +308,63 @@ struct LegacySkillMigrationRow {
     app_type: String,
 }
 
+/// Official Claude Code and the Cometix `hlclaude` fork may install a Skill
+/// with the same live directory name while keeping different contents.  The
+/// existing schema uses `id` as the only identity, so encode the Claude domain
+/// in the id and keep each domain in its own SSOT subtree.  This deliberately
+/// avoids a schema migration while still making both the database identity and
+/// files independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeSkillScope {
+    Official,
+    Cometix,
+}
+
+impl ClaudeSkillScope {
+    const OFFICIAL_ID_PREFIX: &'static str = "cc-switch-scope:v1:claude:";
+    const COMETIX_ID_PREFIX: &'static str = "cc-switch-scope:v1:claude-cometix:";
+
+    fn for_app(app: &AppType) -> Option<Self> {
+        match app {
+            AppType::Claude => Some(Self::Official),
+            AppType::ClaudeCometix => Some(Self::Cometix),
+            _ => None,
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        if id.starts_with(Self::OFFICIAL_ID_PREFIX) {
+            Some(Self::Official)
+        } else if id.starts_with(Self::COMETIX_ID_PREFIX) {
+            Some(Self::Cometix)
+        } else {
+            None
+        }
+    }
+
+    fn id_prefix(self) -> &'static str {
+        match self {
+            Self::Official => Self::OFFICIAL_ID_PREFIX,
+            Self::Cometix => Self::COMETIX_ID_PREFIX,
+        }
+    }
+
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Official => "claude",
+            Self::Cometix => "claude-cometix",
+        }
+    }
+
+    fn scoped_id(self, id: &str) -> String {
+        let base = id
+            .strip_prefix(Self::OFFICIAL_ID_PREFIX)
+            .or_else(|| id.strip_prefix(Self::COMETIX_ID_PREFIX))
+            .unwrap_or(id);
+        format!("{}{base}", self.id_prefix())
+    }
+}
+
 // ========== ~/.agents/ lock 文件解析 ==========
 
 /// `~/.agents/.skill-lock.json` 文件结构
@@ -505,7 +562,7 @@ impl SkillService {
 
     // ========== 路径管理 ==========
 
-    /// 获取 SSOT 目录（根据设置返回 ~/.cc-switch/skills/ 或 ~/.agents/skills/）
+    /// 获取 SSOT 目录（根据设置返回 ~/.cc-switch-cometix/skills/ 或 ~/.agents/skills/）
     pub fn get_ssot_dir() -> Result<PathBuf> {
         let location = crate::settings::get_skill_storage_location();
         let dir = match location {
@@ -518,7 +575,55 @@ impl SkillService {
         Ok(dir)
     }
 
-    /// 获取 Skill 卸载备份目录（~/.cc-switch/skill-backups/）
+    fn get_scoped_ssot_dir(scope: ClaudeSkillScope) -> Result<PathBuf> {
+        let dir = Self::get_ssot_dir()?.join(".scopes").join(scope.dir_name());
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    fn get_skill_ssot_dir(skill: &InstalledSkill) -> Result<PathBuf> {
+        match ClaudeSkillScope::from_id(&skill.id) {
+            Some(scope) => Self::get_scoped_ssot_dir(scope),
+            None => Self::get_ssot_dir(),
+        }
+    }
+
+    fn scope_owns_app(skill: &InstalledSkill, app: &AppType) -> bool {
+        match (
+            ClaudeSkillScope::from_id(&skill.id),
+            ClaudeSkillScope::for_app(app),
+        ) {
+            (Some(skill_scope), Some(app_scope)) => skill_scope == app_scope,
+            _ => true,
+        }
+    }
+
+    fn scope_matches_app(skill: &InstalledSkill, app: &AppType) -> bool {
+        match ClaudeSkillScope::for_app(app) {
+            Some(app_scope) => match ClaudeSkillScope::from_id(&skill.id) {
+                Some(skill_scope) => skill_scope == app_scope,
+                // Legacy unscoped rows remain compatible. New Claude-domain
+                // installs and imports always receive a scoped id.
+                None => true,
+            },
+            None => true,
+        }
+    }
+
+    fn sync_skill_to_app(skill: &InstalledSkill, app: &AppType) -> Result<()> {
+        if !Self::scope_owns_app(skill, app) {
+            return Err(anyhow!(
+                "Skill {} belongs to a different Claude domain",
+                skill.id
+            ));
+        }
+
+        let directory = Self::require_valid_directory(&skill.directory)?;
+        let source = Self::get_skill_ssot_dir(skill)?.join(&directory);
+        Self::sync_source_to_app(&source, &directory, app)
+    }
+
+    /// 获取 Skill 卸载备份目录（~/.cc-switch-cometix/skill-backups/）
     fn get_backup_dir() -> Result<PathBuf> {
         let dir = get_app_config_dir().join("skill-backups");
         fs::create_dir_all(&dir)?;
@@ -575,7 +680,7 @@ impl SkillService {
 
         Ok(match app {
             AppType::Claude => home.join(".claude").join("skills"),
-            AppType::ClaudeCometix => home.join(".claude-cometix").join("skills"),
+            AppType::ClaudeCometix => crate::config::get_claude_cometix_config_dir().join("skills"),
             AppType::ClaudeDesktop => home.join(".claude-desktop").join("skills"),
             AppType::Codex => home.join(".codex").join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),
@@ -594,6 +699,99 @@ impl SkillService {
         Ok(skills.into_values().collect())
     }
 
+    /// Split legacy shared Claude rows into independent official/Cometix rows.
+    ///
+    /// Older builds represented both clients with one database row and one
+    /// SSOT directory. Prefer each client's live directory as the migration
+    /// source so already-diverged contents are preserved. Existing scoped
+    /// destinations win, making the migration safe to retry after interruption.
+    pub fn migrate_claude_scopes(db: &Arc<Database>) -> Result<usize> {
+        let skills = db.get_all_installed_skills()?;
+        let shared_ssot = Self::get_ssot_dir()?;
+        let mut migrated = 0;
+
+        for skill in skills.values() {
+            if ClaudeSkillScope::from_id(&skill.id).is_some() {
+                continue;
+            }
+
+            let directory = match Self::require_valid_directory(&skill.directory) {
+                Ok(directory) => directory,
+                Err(err) => {
+                    log::warn!("跳过 Claude Skill 作用域迁移 {}: {err}", skill.id);
+                    continue;
+                }
+            };
+            let mut remaining_apps = skill.apps.clone();
+
+            for (scope, app, enabled) in [
+                (
+                    ClaudeSkillScope::Official,
+                    AppType::Claude,
+                    skill.apps.claude,
+                ),
+                (
+                    ClaudeSkillScope::Cometix,
+                    AppType::ClaudeCometix,
+                    skill.apps.claude_cometix,
+                ),
+            ] {
+                if !enabled {
+                    continue;
+                }
+
+                let dest = Self::get_scoped_ssot_dir(scope)?.join(&directory);
+                if !dest.join("SKILL.md").is_file() {
+                    let live_source = Self::get_app_skills_dir(&app)?.join(&directory);
+                    let shared_source = shared_ssot.join(&directory);
+                    let source = if live_source.join("SKILL.md").is_file() {
+                        live_source
+                    } else if shared_source.join("SKILL.md").is_file() {
+                        shared_source
+                    } else {
+                        log::warn!("Claude Skill {} 缺少可迁移源，保留旧记录", skill.id);
+                        continue;
+                    };
+
+                    if dest.exists() || Self::is_symlink(&dest) {
+                        Self::remove_path(&dest)?;
+                    }
+                    Self::copy_dir_recursive(&source, &dest)?;
+                }
+
+                let (name, description) =
+                    Self::read_skill_name_desc(&dest.join("SKILL.md"), &directory);
+                let scoped_skill = InstalledSkill {
+                    id: scope.scoped_id(&skill.id),
+                    name,
+                    description,
+                    directory: directory.clone(),
+                    repo_owner: skill.repo_owner.clone(),
+                    repo_name: skill.repo_name.clone(),
+                    repo_branch: skill.repo_branch.clone(),
+                    readme_url: skill.readme_url.clone(),
+                    apps: SkillApps::only(&app),
+                    installed_at: skill.installed_at,
+                    content_hash: Self::compute_dir_hash(&dest).ok(),
+                    updated_at: skill.updated_at,
+                };
+                db.save_skill(&scoped_skill)?;
+                remaining_apps.set_enabled_for(&app, false);
+                migrated += 1;
+            }
+
+            if remaining_apps != skill.apps {
+                if remaining_apps.is_empty() {
+                    db.delete_skill(&skill.id)?;
+                } else {
+                    db.update_skill_apps(&skill.id, &remaining_apps)?;
+                }
+            }
+        }
+
+        Ok(migrated)
+    }
+
     /// 安装 Skill
     ///
     /// 流程：
@@ -606,7 +804,11 @@ impl SkillService {
         skill: &DiscoverableSkill,
         current_app: &AppType,
     ) -> Result<InstalledSkill> {
-        let ssot_dir = Self::get_ssot_dir()?;
+        let install_scope = ClaudeSkillScope::for_app(current_app);
+        let ssot_dir = match install_scope {
+            Some(scope) => Self::get_scoped_ssot_dir(scope)?,
+            None => Self::get_ssot_dir()?,
+        };
 
         // 允许多级目录（如 a/b/c），但必须是安全的相对路径。
         let source_rel = Self::sanitize_skill_source_path(&skill.directory).ok_or_else(|| {
@@ -631,7 +833,9 @@ impl SkillService {
         // 检查数据库中是否已有同名 directory 的 skill（来自其他仓库）
         let existing_skills = db.get_all_installed_skills()?;
         for existing in existing_skills.values() {
-            if existing.directory.eq_ignore_ascii_case(&install_name) {
+            if existing.directory.eq_ignore_ascii_case(&install_name)
+                && ClaudeSkillScope::from_id(&existing.id) == install_scope
+            {
                 // 检查是否来自同一仓库
                 let same_repo = existing.repo_owner.as_deref() == Some(&skill.repo_owner)
                     && existing.repo_name.as_deref() == Some(&skill.repo_name);
@@ -640,7 +844,7 @@ impl SkillService {
                     let mut updated = existing.clone();
                     updated.apps.set_enabled_for(current_app, true);
                     db.save_skill(&updated)?;
-                    Self::sync_to_app_dir(&updated.directory, current_app)?;
+                    Self::sync_skill_to_app(&updated, current_app)?;
                     log::info!(
                         "Skill {} 已存在，更新 {:?} 启用状态",
                         updated.name,
@@ -771,7 +975,9 @@ impl SkillService {
         });
 
         let installed_skill = InstalledSkill {
-            id: skill.key.clone(),
+            id: install_scope
+                .map(|scope| scope.scoped_id(&skill.key))
+                .unwrap_or_else(|| skill.key.clone()),
             name: skill.name.clone(),
             description: if skill.description.is_empty() {
                 None
@@ -793,7 +999,7 @@ impl SkillService {
         db.save_skill(&installed_skill)?;
 
         // 同步到当前应用目录
-        Self::sync_to_app_dir(&install_name, current_app)?;
+        Self::sync_skill_to_app(&installed_skill, current_app)?;
 
         log::info!(
             "Skill {} 安装成功，已启用 {:?}",
@@ -829,13 +1035,24 @@ impl SkillService {
                 let backup_path = Self::create_uninstall_backup(&skill)?
                     .map(|path| path.to_string_lossy().to_string());
 
-                // 从所有应用目录删除
-                for app in AppType::all() {
-                    let _ = Self::remove_from_app(&directory, &app);
+                // Scoped Claude records own only their own Claude domain.
+                // Removing an official row must never delete the same-named
+                // Cometix live directory (and vice versa).
+                if ClaudeSkillScope::from_id(&skill.id).is_some() {
+                    for app in skill.apps.enabled_apps() {
+                        if Self::scope_owns_app(&skill, &app) {
+                            let _ = Self::remove_from_app(&directory, &app);
+                        }
+                    }
+                } else {
+                    // Preserve legacy behavior for pre-scope rows.
+                    for app in AppType::all() {
+                        let _ = Self::remove_from_app(&directory, &app);
+                    }
                 }
 
                 // 从 SSOT 删除
-                let ssot_dir = Self::get_ssot_dir()?;
+                let ssot_dir = Self::get_skill_ssot_dir(&skill)?;
                 let skill_path = ssot_dir.join(&directory);
                 if skill_path.exists() {
                     fs::remove_dir_all(&skill_path)?;
@@ -940,8 +1157,6 @@ impl SkillService {
                 .push(skill);
         }
 
-        let ssot_dir = Self::get_ssot_dir()?;
-
         for ((owner, name, branch), group_skills) in &repo_groups {
             let repo = SkillRepo {
                 owner: owner.clone(),
@@ -1009,7 +1224,7 @@ impl SkillService {
                             None
                         }
                         Ok(directory) => {
-                            let local_dir = ssot_dir.join(&directory);
+                            let local_dir = Self::get_skill_ssot_dir(skill)?.join(&directory);
                             if local_dir.exists() {
                                 match Self::compute_dir_hash(&local_dir) {
                                     Ok(h) => {
@@ -1086,8 +1301,6 @@ impl SkillService {
             enabled: true,
         };
 
-        let ssot_dir = Self::get_ssot_dir()?;
-
         // 下载仓库
         let (temp_guard, used_branch) = timeout(
             std::time::Duration::from_secs(60),
@@ -1152,7 +1365,7 @@ impl SkillService {
         let _ = Self::create_uninstall_backup(&skill);
 
         // 删除旧 SSOT 目录并复制新文件
-        let dest = ssot_dir.join(&skill.directory);
+        let dest = Self::get_skill_ssot_dir(&skill)?.join(&skill.directory);
         if dest.exists() {
             fs::remove_dir_all(&dest)?;
         }
@@ -1190,7 +1403,10 @@ impl SkillService {
 
         // 同步到所有已启用的应用目录
         for app in updated_skill.apps.enabled_apps() {
-            if let Err(e) = Self::sync_to_app_dir(&updated_skill.directory, &app) {
+            if !Self::scope_owns_app(&updated_skill, &app) {
+                continue;
+            }
+            if let Err(e) = Self::sync_skill_to_app(&updated_skill, &app) {
                 log::warn!("同步更新后的 skill 到 {:?} 失败: {e}", app);
             }
         }
@@ -1202,7 +1418,6 @@ impl SkillService {
     /// 为缺少 content_hash 的已安装 Skill 补算哈希
     pub fn backfill_content_hashes(db: &Arc<Database>) -> Result<usize> {
         let skills = db.get_all_installed_skills()?;
-        let ssot_dir = Self::get_ssot_dir()?;
         let mut count = 0;
 
         for skill in skills.values() {
@@ -1213,7 +1428,7 @@ impl SkillService {
                 log::warn!("跳过非法 directory 的哈希回填: {:?}", skill.directory);
                 continue;
             };
-            let skill_dir = ssot_dir.join(&directory);
+            let skill_dir = Self::get_skill_ssot_dir(skill)?.join(&directory);
             if !skill_dir.exists() {
                 continue;
             }
@@ -1281,8 +1496,19 @@ impl SkillService {
                     continue;
                 }
             };
-            let src = old_dir.join(&directory);
-            let dst = new_dir.join(&directory);
+            let scoped_relative = ClaudeSkillScope::from_id(&skill.id)
+                .map(|scope| PathBuf::from(".scopes").join(scope.dir_name()));
+            let src_root = scoped_relative
+                .as_ref()
+                .map(|relative| old_dir.join(relative))
+                .unwrap_or_else(|| old_dir.clone());
+            let dst_root = scoped_relative
+                .as_ref()
+                .map(|relative| new_dir.join(relative))
+                .unwrap_or_else(|| new_dir.clone());
+            fs::create_dir_all(&dst_root)?;
+            let src = src_root.join(&directory);
+            let dst = dst_root.join(&directory);
 
             if !src.exists() {
                 result.skipped_count += 1;
@@ -1395,11 +1621,16 @@ impl SkillService {
         }
 
         let existing_skills = db.get_all_installed_skills()?;
-        if existing_skills.contains_key(&metadata.skill.id)
+        let restore_scope = ClaudeSkillScope::for_app(current_app);
+        let restore_id = restore_scope
+            .map(|scope| scope.scoped_id(&metadata.skill.id))
+            .unwrap_or_else(|| metadata.skill.id.clone());
+        if existing_skills.contains_key(&restore_id)
             || existing_skills.values().any(|skill| {
                 skill
                     .directory
                     .eq_ignore_ascii_case(&metadata.skill.directory)
+                    && ClaudeSkillScope::from_id(&skill.id) == restore_scope
             })
         {
             return Err(anyhow!(
@@ -1412,7 +1643,10 @@ impl SkillService {
         // 未经任何校验就直接 join——可穿越出 SSOT 目录写任意位置。必须先校验。
         let directory = Self::require_valid_directory(&metadata.skill.directory)?;
 
-        let ssot_dir = Self::get_ssot_dir()?;
+        let ssot_dir = match restore_scope {
+            Some(scope) => Self::get_scoped_ssot_dir(scope)?,
+            None => Self::get_ssot_dir()?,
+        };
         let restore_path = ssot_dir.join(&directory);
         if restore_path.exists() || Self::is_symlink(&restore_path) {
             return Err(anyhow!(
@@ -1422,6 +1656,7 @@ impl SkillService {
         }
 
         let mut restored_skill = metadata.skill;
+        restored_skill.id = restore_id;
         restored_skill.directory = directory;
         restored_skill.installed_at = Utc::now().timestamp();
         restored_skill.apps = SkillApps::only(current_app);
@@ -1438,7 +1673,7 @@ impl SkillService {
         }
 
         if !restored_skill.apps.is_empty() {
-            if let Err(err) = Self::sync_to_app_dir(&restored_skill.directory, current_app) {
+            if let Err(err) = Self::sync_skill_to_app(&restored_skill, current_app) {
                 let _ = db.delete_skill(&restored_skill.id);
                 let _ = fs::remove_dir_all(&restore_path);
                 return Err(err);
@@ -1464,12 +1699,19 @@ impl SkillService {
             .get_installed_skill(id)?
             .ok_or_else(|| anyhow!("Skill not found: {id}"))?;
 
+        if !Self::scope_owns_app(&skill, app) {
+            return Err(anyhow!(
+                "Skill {} belongs to a different Claude domain",
+                skill.id
+            ));
+        }
+
         // 更新状态
         skill.apps.set_enabled_for(app, enabled);
 
         // 同步文件
         if enabled {
-            Self::sync_to_app_dir(&skill.directory, app)?;
+            Self::sync_skill_to_app(&skill, app)?;
         } else {
             Self::remove_from_app(&skill.directory, app)?;
         }
@@ -1487,10 +1729,6 @@ impl SkillService {
     /// 扫描各应用目录，找出未被 CC Switch 管理的 Skills
     pub fn scan_unmanaged(db: &Arc<Database>) -> Result<Vec<UnmanagedSkill>> {
         let managed_skills = db.get_all_installed_skills()?;
-        let managed_dirs: HashSet<String> = managed_skills
-            .values()
-            .map(|s| s.directory.clone())
-            .collect();
 
         // 收集所有待扫描的目录及其来源标签
         let mut scan_sources: Vec<(PathBuf, String)> = Vec::new();
@@ -1519,7 +1757,17 @@ impl SkillService {
                     continue;
                 }
                 let dir_name = entry.file_name().to_string_lossy().to_string();
-                if dir_name.starts_with('.') || managed_dirs.contains(&dir_name) {
+                let managed_in_source = match label.parse::<AppType>() {
+                    Ok(app) => managed_skills.values().any(|skill| {
+                        skill.directory.eq_ignore_ascii_case(&dir_name)
+                            && Self::scope_matches_app(skill, &app)
+                            && skill.apps.is_enabled_for(&app)
+                    }),
+                    Err(_) => managed_skills
+                        .values()
+                        .any(|skill| skill.directory.eq_ignore_ascii_case(&dir_name)),
+                };
+                if dir_name.starts_with('.') || managed_in_source {
                     continue;
                 }
 
@@ -1552,7 +1800,6 @@ impl SkillService {
         db: &Arc<Database>,
         imports: Vec<ImportSkillSelection>,
     ) -> Result<Vec<InstalledSkill>> {
-        let ssot_dir = Self::get_ssot_dir()?;
         let agents_lock = parse_agents_lock();
         let mut imported = Vec::new();
 
@@ -1562,18 +1809,6 @@ impl SkillService {
             &agents_lock,
             imports.iter().map(|selection| selection.directory.as_str()),
         );
-
-        // 收集所有候选搜索目录
-        let mut search_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in AppType::all() {
-            if let Ok(d) = Self::get_app_skills_dir(&app) {
-                search_sources.push((d, app.as_str().to_string()));
-            }
-        }
-        if let Some(agents_dir) = get_agents_skills_dir() {
-            search_sources.push((agents_dir, "agents".to_string()));
-        }
-        search_sources.push((ssot_dir.clone(), "cc-switch".to_string()));
 
         for selection in imports {
             // selection.directory 由前端 IPC 直接传入、此前全程无校验，而它既被
@@ -1586,78 +1821,125 @@ impl SkillService {
                     continue;
                 }
             };
-            // 在所有候选目录中查找
-            let mut source_path: Option<PathBuf> = None;
+            // A single import selection may represent the same-named Skill in
+            // both Claude domains. Split those into two records and read each
+            // domain's own live directory; never choose one as the source for
+            // the other. Non-Claude applications retain the legacy shared row.
+            for (scope, apps) in Self::split_import_apps(selection.apps.clone()) {
+                let ssot_dir = match scope {
+                    Some(scope) => Self::get_scoped_ssot_dir(scope)?,
+                    None => Self::get_ssot_dir()?,
+                };
 
-            for (base, label) in &search_sources {
-                let skill_path = base.join(&dir_name);
-                if skill_path.exists() {
-                    if source_path.is_none() {
-                        source_path = Some(skill_path);
+                let mut search_sources: Vec<(PathBuf, String)> = Vec::new();
+                match scope {
+                    Some(scope) => {
+                        let app = match scope {
+                            ClaudeSkillScope::Official => AppType::Claude,
+                            ClaudeSkillScope::Cometix => AppType::ClaudeCometix,
+                        };
+                        if let Ok(dir) = Self::get_app_skills_dir(&app) {
+                            search_sources.push((dir, app.as_str().to_string()));
+                        }
+                        search_sources.push((ssot_dir.clone(), "cc-switch".to_string()));
                     }
-                    log::debug!("Skill '{dir_name}' found in source '{label}'");
+                    None => {
+                        let enabled_apps = apps.enabled_apps();
+                        let candidate_apps = if enabled_apps.is_empty() {
+                            AppType::all()
+                                .filter(|app| ClaudeSkillScope::for_app(app).is_none())
+                                .collect::<Vec<_>>()
+                        } else {
+                            enabled_apps
+                        };
+                        for app in candidate_apps {
+                            if let Ok(dir) = Self::get_app_skills_dir(&app) {
+                                search_sources.push((dir, app.as_str().to_string()));
+                            }
+                        }
+                        if let Some(agents_dir) = get_agents_skills_dir() {
+                            search_sources.push((agents_dir, "agents".to_string()));
+                        }
+                        search_sources.push((ssot_dir.clone(), "cc-switch".to_string()));
+                    }
                 }
+
+                let source = search_sources.iter().find_map(|(base, label)| {
+                    let path = base.join(&dir_name);
+                    if path.join("SKILL.md").is_file() {
+                        log::debug!("Skill '{dir_name}' found in source '{label}'");
+                        Some(path)
+                    } else {
+                        None
+                    }
+                });
+                let Some(source) = source else {
+                    continue;
+                };
+
+                let dest = ssot_dir.join(&dir_name);
+                if !dest.exists() {
+                    Self::copy_dir_recursive(&source, &dest)?;
+                }
+
+                let skill_md = dest.join("SKILL.md");
+                let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
+                let (base_id, repo_owner, repo_name, repo_branch, readme_url) =
+                    build_repo_info_from_lock(&agents_lock, &dir_name);
+                let id = scope
+                    .map(|scope| scope.scoped_id(&base_id))
+                    .unwrap_or(base_id);
+                let content_hash = Self::compute_dir_hash(&dest).ok();
+
+                let skill = InstalledSkill {
+                    id,
+                    name,
+                    description,
+                    directory: dir_name.clone(),
+                    repo_owner,
+                    repo_name,
+                    repo_branch,
+                    readme_url,
+                    apps,
+                    installed_at: chrono::Utc::now().timestamp(),
+                    content_hash,
+                    updated_at: 0,
+                };
+
+                db.save_skill(&skill)?;
+                imported.push(skill);
             }
-
-            let source = match source_path {
-                Some(p) => p,
-                None => continue,
-            };
-            if !source.join("SKILL.md").exists() {
-                log::warn!(
-                    "Skip importing '{}' because source '{}' has no SKILL.md",
-                    dir_name,
-                    source.display()
-                );
-                continue;
-            }
-
-            // 复制到 SSOT
-            let dest = ssot_dir.join(&dir_name);
-            if !dest.exists() {
-                Self::copy_dir_recursive(&source, &dest)?;
-            }
-
-            // 解析元数据
-            let skill_md = dest.join("SKILL.md");
-            let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
-
-            // 启用状态仅信任用户本次显式选择，不再根据“在哪些位置找到”自动推断。
-            let apps = selection.apps;
-
-            // 从 lock 文件提取仓库信息
-            let (id, repo_owner, repo_name, repo_branch, readme_url) =
-                build_repo_info_from_lock(&agents_lock, &dir_name);
-
-            // 计算内容哈希
-            let ssot_skill_dir = ssot_dir.join(&dir_name);
-            let content_hash = Self::compute_dir_hash(&ssot_skill_dir).ok();
-
-            // 创建记录
-            let skill = InstalledSkill {
-                id,
-                name,
-                description,
-                directory: dir_name,
-                repo_owner,
-                repo_name,
-                repo_branch,
-                readme_url,
-                apps,
-                installed_at: chrono::Utc::now().timestamp(),
-                content_hash,
-                updated_at: 0,
-            };
-
-            // 保存到数据库
-            db.save_skill(&skill)?;
-
-            imported.push(skill);
         }
 
         log::info!("成功导入 {} 个 Skills", imported.len());
 
         Ok(imported)
+    }
+
+    fn split_import_apps(apps: SkillApps) -> Vec<(Option<ClaudeSkillScope>, SkillApps)> {
+        let mut variants = Vec::new();
+
+        if apps.claude {
+            variants.push((
+                Some(ClaudeSkillScope::Official),
+                SkillApps::only(&AppType::Claude),
+            ));
+        }
+        if apps.claude_cometix {
+            variants.push((
+                Some(ClaudeSkillScope::Cometix),
+                SkillApps::only(&AppType::ClaudeCometix),
+            ));
+        }
+
+        let mut shared_apps = apps;
+        shared_apps.claude = false;
+        shared_apps.claude_cometix = false;
+        if !shared_apps.is_empty() || variants.is_empty() {
+            variants.push((None, shared_apps));
+        }
+
+        variants
     }
 
     // ========== 文件同步方法 ==========
@@ -1704,22 +1986,43 @@ impl SkillService {
         // directory 可能来自被污染的 DB 行（如同步导入的远端快照），join 前必须校验。
         let directory = Self::require_valid_directory(directory)?;
 
-        let ssot_dir = Self::get_ssot_dir()?;
-        let source = ssot_dir.join(&directory);
+        // Compatibility entry point without a DB row. Prefer the scoped
+        // Claude-domain source when present, otherwise fall back to the legacy
+        // shared SSOT directory.
+        let legacy_source = Self::get_ssot_dir()?.join(&directory);
+        let source = match ClaudeSkillScope::for_app(app) {
+            Some(scope) => {
+                let scoped_source = Self::get_scoped_ssot_dir(scope)?.join(&directory);
+                if scoped_source.is_dir() {
+                    scoped_source
+                } else {
+                    legacy_source
+                }
+            }
+            None => legacy_source,
+        };
 
-        Self::validate_sync_source_dir(&source, &directory)?;
+        Self::sync_source_to_app(&source, &directory, app)
+    }
+
+    fn sync_source_to_app(source: &Path, directory: &str, app: &AppType) -> Result<()> {
+        if matches!(app, AppType::ClaudeDesktop) {
+            return Ok(());
+        }
+
+        Self::validate_sync_source_dir(source, directory)?;
 
         let app_dir = Self::get_app_skills_dir(app)?;
         fs::create_dir_all(&app_dir)?;
 
-        let dest = app_dir.join(&directory);
+        let dest = app_dir.join(directory);
 
         let sync_method = Self::get_sync_method();
 
         match sync_method {
             SyncMethod::Auto => {
                 if dest.exists() && !Self::is_symlink(&dest) {
-                    Self::replace_dest_with_copy(&source, &dest, &directory)?;
+                    Self::replace_dest_with_copy(source, &dest, directory)?;
                     log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
                     return Ok(());
                 }
@@ -1729,7 +2032,7 @@ impl SkillService {
                 }
 
                 // 优先尝试 symlink
-                match Self::create_symlink(&source, &dest) {
+                match Self::create_symlink(source, &dest) {
                     Ok(()) => {
                         log::debug!("Skill {directory} 已通过 symlink 同步到 {app:?}");
                         return Ok(());
@@ -1743,18 +2046,18 @@ impl SkillService {
                     }
                 }
                 // Fallback 到 copy
-                Self::replace_dest_with_copy(&source, &dest, &directory)?;
+                Self::replace_dest_with_copy(source, &dest, directory)?;
                 log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
             }
             SyncMethod::Symlink => {
                 if dest.exists() || Self::is_symlink(&dest) {
                     Self::remove_path(&dest)?;
                 }
-                Self::create_symlink(&source, &dest)?;
+                Self::create_symlink(source, &dest)?;
                 log::debug!("Skill {directory} 已通过 symlink 同步到 {app:?}");
             }
             SyncMethod::Copy => {
-                Self::replace_dest_with_copy(&source, &dest, &directory)?;
+                Self::replace_dest_with_copy(source, &dest, directory)?;
                 log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
             }
         }
@@ -1901,9 +2204,34 @@ impl SkillService {
         let ssot_dir = Self::get_ssot_dir()?;
         let app_dir = Self::get_app_skills_dir(app)?;
 
-        let indexed_skills: HashMap<String, &InstalledSkill> = skills
+        // Once a directory has a row scoped to this Claude domain, that row is
+        // authoritative. A legacy unscoped row with the same directory must
+        // not run afterward and overwrite the scoped contents.
+        let app_scope = ClaudeSkillScope::for_app(app);
+        let scoped_directories: HashSet<String> = app_scope
+            .map(|scope| {
+                skills
+                    .values()
+                    .filter(|skill| ClaudeSkillScope::from_id(&skill.id) == Some(scope))
+                    .map(|skill| skill.directory.to_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let applies_to_app = |skill: &InstalledSkill| {
+            Self::scope_matches_app(skill, app)
+                && !(ClaudeSkillScope::from_id(&skill.id).is_none()
+                    && scoped_directories.contains(&skill.directory.to_lowercase()))
+        };
+
+        let known_directories: HashSet<String> = skills
             .values()
-            .map(|skill| (skill.directory.to_lowercase(), skill))
+            .filter(|skill| applies_to_app(skill))
+            .map(|skill| skill.directory.to_lowercase())
+            .collect();
+        let enabled_directories: HashSet<String> = skills
+            .values()
+            .filter(|skill| applies_to_app(skill) && skill.apps.is_enabled_for(app))
+            .map(|skill| skill.directory.to_lowercase())
             .collect();
 
         if app_dir.exists() {
@@ -1916,8 +2244,9 @@ impl SkillService {
                     continue;
                 }
 
-                if let Some(skill) = indexed_skills.get(&dir_name.to_lowercase()) {
-                    if !skill.apps.is_enabled_for(app) {
+                let normalized = dir_name.to_lowercase();
+                if known_directories.contains(&normalized) {
+                    if !enabled_directories.contains(&normalized) {
                         Self::remove_path(&path)?;
                     }
                     continue;
@@ -1930,11 +2259,11 @@ impl SkillService {
         }
 
         for skill in skills.values() {
-            if skill.apps.is_enabled_for(app) {
+            if applies_to_app(skill) && skill.apps.is_enabled_for(app) {
                 // 逐条容错而非 `?` 传播：本函数在切换供应商时被调用，一条脏
                 // directory（存量点开头目录、或同步导入灌进来的行）不得让整个
                 // 应用的 skill 同步全部失效。
-                if let Err(err) = Self::sync_to_app_dir(&skill.directory, app) {
+                if let Err(err) = Self::sync_skill_to_app(skill, app) {
                     log::warn!(
                         "同步 skill {} 到 {app:?} 失败，跳过该条: {err}",
                         skill.directory
@@ -2812,16 +3141,19 @@ impl SkillService {
     }
 
     fn resolve_uninstall_backup_source(skill: &InstalledSkill) -> Result<Option<PathBuf>> {
-        // 返回值会被整目录复制进 ~/.cc-switch/skill-backups/ 并由 get_skill_backups
+        // 返回值会被整目录复制进 ~/.cc-switch-cometix/skill-backups/ 并由 get_skill_backups
         // 在界面上列出——脏 directory 在这里等于任意文件读取 + 外泄通道。
         let directory = Self::require_valid_directory(&skill.directory)?;
 
-        let ssot_path = Self::get_ssot_dir()?.join(&directory);
+        let ssot_path = Self::get_skill_ssot_dir(skill)?.join(&directory);
         if ssot_path.is_dir() {
             return Ok(Some(ssot_path));
         }
 
         for app in AppType::all() {
+            if !Self::scope_owns_app(skill, &app) {
+                continue;
+            }
             let app_dir = match Self::get_app_skills_dir(&app) {
                 Ok(dir) => dir,
                 Err(_) => continue,
@@ -3071,7 +3403,11 @@ impl SkillService {
             )));
         }
 
-        let ssot_dir = Self::get_ssot_dir()?;
+        let install_scope = ClaudeSkillScope::for_app(current_app);
+        let ssot_dir = match install_scope {
+            Some(scope) => Self::get_scoped_ssot_dir(scope)?,
+            None => Self::get_ssot_dir()?,
+        };
         let mut installed = Vec::new();
         let existing_skills = db.get_all_installed_skills()?;
         let zip_stem = zip_path
@@ -3128,9 +3464,10 @@ impl SkillService {
             };
 
             // 检查是否已有同名 directory 的 skill
-            let conflict = existing_skills
-                .values()
-                .find(|s| s.directory.eq_ignore_ascii_case(&install_name));
+            let conflict = existing_skills.values().find(|s| {
+                s.directory.eq_ignore_ascii_case(&install_name)
+                    && ClaudeSkillScope::from_id(&s.id) == install_scope
+            });
 
             if let Some(existing) = conflict {
                 log::warn!(
@@ -3161,7 +3498,9 @@ impl SkillService {
 
             // 创建 InstalledSkill 记录
             let skill = InstalledSkill {
-                id: format!("local:{install_name}"),
+                id: install_scope
+                    .map(|scope| scope.scoped_id(&format!("local:{install_name}")))
+                    .unwrap_or_else(|| format!("local:{install_name}")),
                 name,
                 description,
                 directory: install_name.clone(),
@@ -3179,7 +3518,7 @@ impl SkillService {
             db.save_skill(&skill)?;
 
             // 同步到当前应用目录
-            Self::sync_to_app_dir(&install_name, current_app)?;
+            Self::sync_skill_to_app(&skill, current_app)?;
 
             log::info!(
                 "Skill {} installed from ZIP, enabled for {:?}",
@@ -4532,6 +4871,10 @@ mod tests {
             "skills dir must live under the overridden test home, got {}",
             dir.display()
         );
+
+        let cometix = SkillService::get_app_skills_dir(&AppType::ClaudeCometix)
+            .expect("resolve Cometix skills dir");
+        assert_eq!(cometix, temp.path().join(".hlclaude").join("skills"));
     }
 
     #[test]

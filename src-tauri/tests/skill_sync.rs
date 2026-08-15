@@ -78,7 +78,10 @@ fn import_from_apps_does_not_rewrite_selected_app_directory() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let ssot_skill_dir = home.join(".cc-switch").join("skills").join("codex-skill");
+    let ssot_skill_dir = home
+        .join(".cc-switch-cometix")
+        .join("skills")
+        .join("codex-skill");
     write_skill(&ssot_skill_dir, "Stale SSOT Skill");
     fs::write(ssot_skill_dir.join("prompt.md"), "stale ssot").expect("write stale ssot prompt");
 
@@ -120,12 +123,210 @@ fn import_from_apps_does_not_rewrite_selected_app_directory() {
 }
 
 #[test]
+fn claude_and_cometix_same_named_skills_are_independent() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let claude_live = home.join(".claude").join("skills").join("same-skill");
+    write_skill(&claude_live, "Official Same Skill");
+    fs::write(claude_live.join("prompt.md"), "official-v1").expect("write official prompt");
+
+    let cometix_live = home.join(".hlclaude").join("skills").join("same-skill");
+    write_skill(&cometix_live, "Cometix Same Skill");
+    fs::write(cometix_live.join("prompt.md"), "cometix-v1").expect("write cometix prompt");
+
+    let state = create_test_state().expect("create test state");
+    let mut imported = SkillService::import_from_apps(
+        &state.db,
+        vec![ImportSkillSelection {
+            directory: "same-skill".to_string(),
+            apps: SkillApps {
+                claude: true,
+                ..Default::default()
+            },
+        }],
+    )
+    .expect("import official Claude domain");
+
+    let unmanaged_after_official = SkillService::scan_unmanaged(&state.db)
+        .expect("scan Cometix after importing official Claude");
+    assert!(
+        unmanaged_after_official.iter().any(|skill| {
+            skill.directory == "same-skill"
+                && skill.found_in.iter().any(|app| app == "claude-cometix")
+        }),
+        "the same-named Cometix live skill must remain independently importable"
+    );
+
+    imported.extend(
+        SkillService::import_from_apps(
+            &state.db,
+            vec![ImportSkillSelection {
+                directory: "same-skill".to_string(),
+                apps: SkillApps {
+                    claude_cometix: true,
+                    ..Default::default()
+                },
+            }],
+        )
+        .expect("import Cometix Claude domain"),
+    );
+
+    assert_eq!(
+        imported.len(),
+        2,
+        "the two Claude domains need separate database identities"
+    );
+    let official = imported
+        .iter()
+        .find(|skill| skill.apps.claude)
+        .expect("official Claude record");
+    let cometix = imported
+        .iter()
+        .find(|skill| skill.apps.claude_cometix)
+        .expect("Cometix record");
+    assert_ne!(official.id, cometix.id, "scoped ids must not collide");
+
+    let ssot = SkillService::get_ssot_dir().expect("resolve SSOT");
+    let official_ssot = ssot.join(".scopes").join("claude").join("same-skill");
+    let cometix_ssot = ssot
+        .join(".scopes")
+        .join("claude-cometix")
+        .join("same-skill");
+    assert_eq!(
+        fs::read_to_string(official_ssot.join("prompt.md")).expect("read official SSOT"),
+        "official-v1"
+    );
+    assert_eq!(
+        fs::read_to_string(cometix_ssot.join("prompt.md")).expect("read Cometix SSOT"),
+        "cometix-v1"
+    );
+
+    fs::write(official_ssot.join("prompt.md"), "official-v2").expect("edit official SSOT");
+    SkillService::sync_to_app(&state.db, &AppType::Claude).expect("sync official Claude");
+    assert_eq!(
+        fs::read_to_string(claude_live.join("prompt.md")).expect("read official live"),
+        "official-v2"
+    );
+    assert_eq!(
+        fs::read_to_string(cometix_live.join("prompt.md")).expect("read Cometix live"),
+        "cometix-v1",
+        "syncing official Claude must not rewrite Cometix"
+    );
+
+    SkillService::uninstall(&state.db, &official.id).expect("uninstall official skill");
+    assert!(
+        state
+            .db
+            .get_installed_skill(&cometix.id)
+            .expect("query Cometix row")
+            .is_some(),
+        "uninstalling official Claude must preserve the Cometix DB row"
+    );
+    assert!(
+        cometix_ssot.join("prompt.md").exists(),
+        "uninstalling official Claude must preserve Cometix SSOT"
+    );
+    assert_eq!(
+        fs::read_to_string(cometix_live.join("prompt.md"))
+            .expect("read Cometix live after uninstall"),
+        "cometix-v1",
+        "uninstalling official Claude must preserve Cometix live content"
+    );
+}
+
+#[test]
+fn legacy_shared_claude_skill_is_split_without_losing_diverged_live_contents() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+    let ssot = SkillService::get_ssot_dir().expect("resolve SSOT");
+
+    let shared = ssot.join("legacy-skill");
+    write_skill(&shared, "Legacy Shared");
+    fs::write(shared.join("prompt.md"), "shared").expect("write shared prompt");
+
+    let official_live = home.join(".claude").join("skills").join("legacy-skill");
+    write_skill(&official_live, "Legacy Official");
+    fs::write(official_live.join("prompt.md"), "official-live")
+        .expect("write official live prompt");
+
+    let cometix_live = home.join(".hlclaude").join("skills").join("legacy-skill");
+    write_skill(&cometix_live, "Legacy Cometix");
+    fs::write(cometix_live.join("prompt.md"), "cometix-live").expect("write Cometix live prompt");
+
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .save_skill(&InstalledSkill {
+            id: "local:legacy-skill".to_string(),
+            name: "Legacy Shared".to_string(),
+            description: None,
+            directory: "legacy-skill".to_string(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: SkillApps {
+                claude: true,
+                claude_cometix: true,
+                ..Default::default()
+            },
+            installed_at: 42,
+            content_hash: None,
+            updated_at: 0,
+        })
+        .expect("seed legacy shared row");
+
+    assert_eq!(
+        SkillService::migrate_claude_scopes(&state.db).expect("migrate Claude scopes"),
+        2
+    );
+    assert!(
+        state
+            .db
+            .get_installed_skill("local:legacy-skill")
+            .expect("query legacy row")
+            .is_none(),
+        "the fully migrated shared row should be removed"
+    );
+    let rows = state
+        .db
+        .get_all_installed_skills()
+        .expect("query scoped rows");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.values().any(|skill| skill.apps.claude));
+    assert!(rows.values().any(|skill| skill.apps.claude_cometix));
+    assert_eq!(
+        fs::read_to_string(
+            ssot.join(".scopes")
+                .join("claude")
+                .join("legacy-skill")
+                .join("prompt.md"),
+        )
+        .expect("read migrated official prompt"),
+        "official-live"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            ssot.join(".scopes")
+                .join("claude-cometix")
+                .join("legacy-skill")
+                .join("prompt.md"),
+        )
+        .expect("read migrated Cometix prompt"),
+        "cometix-live"
+    );
+}
+
+#[test]
 fn sync_to_app_removes_disabled_and_orphaned_ssot_symlinks() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
 
-    let ssot_dir = home.join(".cc-switch").join("skills");
+    let ssot_dir = home.join(".cc-switch-cometix").join("skills");
     let disabled_skill = ssot_dir.join("disabled-skill");
     let orphan_skill = ssot_dir.join("orphan-skill");
     write_skill(&disabled_skill, "Disabled");
@@ -173,7 +374,10 @@ fn uninstall_skill_creates_backup_before_removing_ssot() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let ssot_skill_dir = home.join(".cc-switch").join("skills").join("backup-skill");
+    let ssot_skill_dir = home
+        .join(".cc-switch-cometix")
+        .join("skills")
+        .join("backup-skill");
     write_skill(&ssot_skill_dir, "Backup Skill");
     fs::write(ssot_skill_dir.join("prompt.md"), "backup me").expect("write prompt.md");
 
@@ -241,7 +445,10 @@ fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let ssot_skill_dir = home.join(".cc-switch").join("skills").join("restore-skill");
+    let ssot_skill_dir = home
+        .join(".cc-switch-cometix")
+        .join("skills")
+        .join("restore-skill");
     write_skill(&ssot_skill_dir, "Restore Skill");
     fs::write(ssot_skill_dir.join("prompt.md"), "restore me").expect("write prompt.md");
 
@@ -289,12 +496,14 @@ fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
         "restore should only enable the selected app"
     );
     assert!(
-        home.join(".cc-switch")
-            .join("skills")
+        SkillService::get_ssot_dir()
+            .expect("resolve SSOT")
+            .join(".scopes")
+            .join("claude")
             .join("restore-skill")
             .join("prompt.md")
             .exists(),
-        "restored skill should exist in SSOT"
+        "restored Claude skill should exist in its scoped SSOT"
     );
     assert!(
         home.join(".claude")
@@ -307,7 +516,7 @@ fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
     assert!(
         state
             .db
-            .get_installed_skill("local:restore-skill")
+            .get_installed_skill(&restored.id)
             .expect("query restored skill")
             .is_some(),
         "restored skill should be written back to the database"
@@ -321,7 +530,7 @@ fn delete_skill_backup_removes_backup_directory() {
     let home = ensure_test_home();
 
     let ssot_skill_dir = home
-        .join(".cc-switch")
+        .join(".cc-switch-cometix")
         .join("skills")
         .join("delete-backup-skill");
     write_skill(&ssot_skill_dir, "Delete Backup Skill");

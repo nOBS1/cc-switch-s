@@ -67,6 +67,7 @@ describe("useDirectorySettings", () => {
     getAppConfigDirOverrideMock.mockResolvedValue(null);
     getConfigDirMock.mockImplementation(async (app: string) => {
       if (app === "claude") return "/remote/claude";
+      if (app === "claude-cometix") return "/remote/claude-cometix";
       if (app === "codex") return "/remote/codex";
       if (app === "gemini") return "/remote/gemini";
       if (app === "grokbuild") return "/remote/grok";
@@ -90,6 +91,7 @@ describe("useDirectorySettings", () => {
     expect(result.current.resolvedDirs).toEqual({
       appConfig: "/override/app",
       claude: "/remote/claude",
+      "claude-cometix": "/remote/claude-cometix",
       codex: "/remote/codex",
       gemini: "/remote/gemini",
       grokbuild: "/remote/grok",
@@ -185,7 +187,7 @@ describe("useDirectorySettings", () => {
 
     expect(result.current.appConfigDir).toBe("/new/app");
     expect(selectConfigDirectoryMock).toHaveBeenCalledWith(
-      "/home/mock/.cc-switch",
+      "/home/mock/.cc-switch-cometix",
     );
   });
 
@@ -215,7 +217,9 @@ describe("useDirectorySettings", () => {
     });
     expect(result.current.resolvedDirs.claude).toBe("/home/mock/.claude");
     expect(result.current.resolvedDirs.codex).toBe("/home/mock/.codex");
-    expect(result.current.resolvedDirs.appConfig).toBe("/home/mock/.cc-switch");
+    expect(result.current.resolvedDirs.appConfig).toBe(
+      "/home/mock/.cc-switch-cometix",
+    );
   });
 
   it("updates openclaw directory when browsing succeeds", async () => {

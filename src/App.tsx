@@ -68,7 +68,6 @@ import { SettingsPage } from "@/components/settings/SettingsPage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
-import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
@@ -98,6 +97,7 @@ import ToolsPanel from "@/components/openclaw/ToolsPanel";
 import AgentsDefaultsPanel from "@/components/openclaw/AgentsDefaultsPanel";
 import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
+import { isManagementApp } from "@/utils/forkPolicy";
 
 type View =
   | "providers"
@@ -128,7 +128,6 @@ const STORAGE_KEY = "cc-switch-last-app";
 const VALID_APPS: AppId[] = [
   "claude",
   "claude-cometix",
-  "claude-desktop",
   "codex",
   "gemini",
   "grokbuild",
@@ -139,8 +138,11 @@ const VALID_APPS: AppId[] = [
 
 const getInitialApp = (): AppId => {
   const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
-  if (saved && VALID_APPS.includes(saved)) {
+  if (saved && isManagementApp(saved) && VALID_APPS.includes(saved)) {
     return saved;
+  }
+  if (saved === "claude-desktop") {
+    localStorage.setItem(STORAGE_KEY, "claude");
   }
   return "claude";
 };
@@ -177,8 +179,7 @@ function App() {
 
   const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
   const providerApp = activeApp;
-  const sharedFeatureApp: AppId =
-    activeApp === "claude-desktop" ? "claude" : providerApp;
+  const sharedFeatureApp: AppId = providerApp;
   const [currentView, setCurrentView] = useState<View>(getInitialView);
   const [skillsDiscoverySource, setSkillsDiscoverySource] =
     useState<SkillsPageSource>("repos");
@@ -208,7 +209,6 @@ function App() {
   const visibleApps: VisibleApps = {
     claude: true,
     "claude-cometix": true,
-    "claude-desktop": true,
     codex: true,
     gemini: true,
     grokbuild: true,
@@ -216,12 +216,12 @@ function App() {
     openclaw: true,
     hermes: true,
     ...settingsData?.visibleApps,
+    "claude-desktop": false,
   };
 
   const getFirstVisibleApp = (): AppId => {
     if (visibleApps.claude) return "claude";
     if (visibleApps["claude-cometix"]) return "claude-cometix";
-    if (visibleApps["claude-desktop"]) return "claude-desktop";
     if (visibleApps.codex) return "codex";
     if (visibleApps.gemini) return "gemini";
     if (visibleApps.grokbuild) return "grokbuild";
@@ -1234,7 +1234,7 @@ function App() {
               <div className="flex items-center gap-2">
                 <div className="relative inline-flex items-center">
                   <a
-                    href="https://ccswitch.io"
+                    href="https://github.com/nOBS1/cc-switch-s"
                     target="_blank"
                     rel="noreferrer"
                     className={cn(
@@ -1244,7 +1244,7 @@ function App() {
                         : "text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300",
                     )}
                   >
-                    CC Switch
+                    CC Switch Cometix
                   </a>
                 </div>
                 <Button
@@ -1294,16 +1294,11 @@ function App() {
                   className="flex shrink-0 items-center gap-1.5"
                   style={{ WebkitAppRegion: "no-drag" } as any}
                 >
-                  {activeApp === "claude-desktop" ? (
-                    <ClaudeDesktopRouteToggle />
-                  ) : (
-                    activeApp !== "claude-cometix" &&
+                  {activeApp !== "claude-cometix" &&
                     settingsData?.enableLocalProxy && (
                       <ProxyToggle activeApp={providerApp} />
-                    )
-                  )}
-                  {activeApp !== "claude-desktop" &&
-                    activeApp !== "claude-cometix" &&
+                    )}
+                  {activeApp !== "claude-cometix" &&
                     settingsData?.enableFailoverToggle && (
                       <FailoverToggle activeApp={providerApp} />
                     )}

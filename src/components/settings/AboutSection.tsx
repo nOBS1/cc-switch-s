@@ -129,6 +129,13 @@ const HERMES_WINDOWS_INSTALL_COMMAND = `powershell -NoProfile -ExecutionPolicy B
 
 const POSIX_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
 ${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthropic-ai/claude-code@latest
+# Claude Code (Cometix)
+npm install --prefix "$HOME/.local/share/hlclaude" @cometix/claude-code@latest
+mkdir -p "$HOME/.local/bin"
+if [ ! -e "$HOME/.local/bin/hlclaude" ]; then
+printf '%s\n' '#!/usr/bin/env sh' 'export CLAUDE_CONFIG_DIR="\${HOME}/.hlclaude"' 'export DISABLE_AUTOUPDATER=1' 'exec node "\${HOME}/.local/share/hlclaude/node_modules/@cometix/claude-code/cli.js" "$@"' > "$HOME/.local/bin/hlclaude"
+chmod +x "$HOME/.local/bin/hlclaude"
+fi
 # Codex
 npm i -g @openai/codex@latest
 # Gemini CLI
@@ -144,6 +151,22 @@ ${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/herm
 
 const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
 npm i -g @anthropic-ai/claude-code@latest
+# Claude Code (Cometix)
+npm install --prefix "$env:USERPROFILE\\.local\\share\\hlclaude" @cometix/claude-code@latest
+$hlclaudeBin = Join-Path $env:USERPROFILE ".local\\bin"
+New-Item -ItemType Directory -Force $hlclaudeBin | Out-Null
+$hlclaudeLauncher = Join-Path $hlclaudeBin "hlclaude.cmd"
+if (-not (Test-Path $hlclaudeLauncher)) {
+@'
+@echo off
+setlocal
+set "CLAUDE_CONFIG_DIR=%USERPROFILE%\\.hlclaude"
+set "DISABLE_AUTOUPDATER=1"
+node "%USERPROFILE%\\.local\\share\\hlclaude\\node_modules\\@cometix\\claude-code\\cli.js" %*
+set "HLCLAUDE_EXIT_CODE=%ERRORLEVEL%"
+endlocal & exit /b %HLCLAUDE_EXIT_CODE%
+'@ | Set-Content -Encoding Ascii $hlclaudeLauncher
+}
 # Codex
 npm i -g @openai/codex@latest
 # Gemini CLI
@@ -441,13 +464,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
       if (!displayVersion) {
         await settingsApi.openExternal(
-          "https://github.com/farion1231/cc-switch/releases",
+          "https://github.com/nOBS1/cc-switch-s/releases",
         );
         return;
       }
 
       await settingsApi.openExternal(
-        `https://github.com/farion1231/cc-switch/releases/tag/${displayVersion}`,
+        `https://github.com/nOBS1/cc-switch-s/releases/tag/${displayVersion}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
@@ -841,9 +864,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           <div className="flex items-center gap-8">
             <div className="flex flex-col items-center gap-2">
               <div className="flex items-center gap-2">
-                <img src={appIcon} alt="CC Switch" className="h-5 w-5" />
+                <img
+                  src={appIcon}
+                  alt="CC Switch Cometix"
+                  className="h-5 w-5"
+                />
                 <h4 className="text-lg font-semibold text-foreground">
-                  CC Switch
+                  CC Switch Cometix
                 </h4>
               </div>
               <div className="flex items-center gap-2">
@@ -872,7 +899,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => settingsApi.openExternal("https://ccswitch.io")}
+              onClick={() =>
+                settingsApi.openExternal("https://github.com/nOBS1/cc-switch-s")
+              }
               className="h-8 gap-1.5 text-xs"
             >
               <Globe className="h-3.5 w-3.5" />
@@ -883,9 +912,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               variant="outline"
               size="sm"
               onClick={() =>
-                settingsApi.openExternal(
-                  "https://github.com/farion1231/cc-switch",
-                )
+                settingsApi.openExternal("https://github.com/nOBS1/cc-switch-s")
               }
               className="h-8 gap-1.5 text-xs"
             >

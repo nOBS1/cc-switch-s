@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { getToolVersionsMock } = vi.hoisted(() => ({
@@ -53,5 +53,19 @@ describe("AboutSection Cometix version source", () => {
       await screen.findByText("settings.cometixVersionSource"),
     ).toBeInTheDocument();
     expect(screen.getByText("2.1.220")).toBeInTheDocument();
+  });
+
+  it("shows an isolated hlclaude command in manual install instructions", async () => {
+    render(<AboutSection isPortable={false} />);
+
+    await screen.findByText("settings.cometixVersionSource");
+    fireEvent.click(
+      screen.getByRole("button", { name: "settings.manualInstallCommands" }),
+    );
+
+    const commands = screen.getByText(/@cometix\/claude-code@latest/);
+    expect(commands).toHaveTextContent(".local\\share\\hlclaude");
+    expect(commands).toHaveTextContent("hlclaude.cmd");
+    expect(commands).toHaveTextContent("Test-Path $hlclaudeLauncher");
   });
 });

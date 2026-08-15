@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import type { ResolvedDirectories } from "@/hooks/useSettings";
 
-type DirectoryAppId = Exclude<AppId, "claude-desktop" | "claude-cometix">;
+type DirectoryAppId = Exclude<AppId, "claude-desktop">;
 
 interface DirectorySettingsProps {
   appConfigDir?: string;
@@ -15,6 +15,7 @@ interface DirectorySettingsProps {
   onBrowseAppConfig: () => Promise<void>;
   onResetAppConfig: () => Promise<void>;
   claudeDir?: string;
+  claudeCometixDir?: string;
   codexDir?: string;
   geminiDir?: string;
   grokDir?: string;
@@ -33,6 +34,7 @@ export function DirectorySettings({
   onBrowseAppConfig,
   onResetAppConfig,
   claudeDir,
+  claudeCometixDir,
   codexDir,
   geminiDir,
   grokDir,
@@ -104,6 +106,21 @@ export function DirectorySettings({
           onChange={(val) => onDirectoryChange("claude", val)}
           onBrowse={() => onBrowseDirectory("claude")}
           onReset={() => onResetDirectory("claude")}
+        />
+
+        <DirectoryInput
+          label={t("settings.claudeCometixConfigDir", {
+            defaultValue: "Claude Code (Cometix) 配置目录",
+          })}
+          description={undefined}
+          value={claudeCometixDir}
+          resolvedValue={resolvedDirs["claude-cometix"]}
+          placeholder={t("settings.browsePlaceholderClaudeCometix", {
+            defaultValue: "例如：C:\\Users\\Administrator\\.hlclaude",
+          })}
+          onChange={(val) => onDirectoryChange("claude-cometix", val)}
+          onBrowse={() => onBrowseDirectory("claude-cometix")}
+          onReset={() => onResetDirectory("claude-cometix")}
         />
 
         <DirectoryInput

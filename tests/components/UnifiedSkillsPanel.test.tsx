@@ -377,6 +377,42 @@ describe("UnifiedSkillsPanel", () => {
     });
   });
 
+  it("keeps scoped official and Cometix rows out of each other's toggles", async () => {
+    installedSkillsMock = [
+      makeInstalledSkill({
+        id: "cc-switch-scope:v1:claude:local:same-skill",
+        name: "Official Same Skill",
+      }),
+      makeInstalledSkill({
+        id: "cc-switch-scope:v1:claude-cometix:local:same-skill",
+        name: "Cometix Same Skill",
+      }),
+    ];
+    bulkToggleSkillAppMock.mockResolvedValue({
+      succeeded: ["cc-switch-scope:v1:claude-cometix:local:same-skill"],
+      failed: [],
+    });
+    renderPanel();
+
+    expect(screen.getAllByRole("button", { name: "Claude" })).toHaveLength(1);
+    expect(
+      screen.getAllByRole("button", { name: "Claude Code (Cometix)" }),
+    ).toHaveLength(1);
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByText("Claude Code (Cometix):").closest("button")!,
+    );
+
+    await waitFor(() => {
+      expect(bulkToggleSkillAppMock).toHaveBeenCalledWith({
+        ids: ["cc-switch-scope:v1:claude-cometix:local:same-skill"],
+        app: "claude-cometix",
+        enabled: true,
+      });
+    });
+  });
+
   it("enables all Skills when none are enabled for an app", async () => {
     installedSkillsMock = [
       makeInstalledSkill({ id: "first-id" }),

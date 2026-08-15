@@ -1,5 +1,5 @@
 import { createRef } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
@@ -10,6 +10,7 @@ import {
 } from "@/components/skills/SkillsPage";
 import type {
   DiscoverableSkill,
+  InstalledSkill,
   SkillRepo,
   SkillsShDiscoverableSkill,
   SkillsShSearchResult,
@@ -17,6 +18,7 @@ import type {
 
 const installMutateAsyncMock = vi.fn();
 let discoverableSkillsMock: DiscoverableSkill[] = [];
+let installedSkillsMock: InstalledSkill[] = [];
 let skillReposMock: SkillRepo[] = [];
 const refetchDiscoverableMock = vi.fn();
 
@@ -67,7 +69,7 @@ vi.mock("@/hooks/useSkills", () => ({
     refetch: refetchDiscoverableMock,
   }),
   useInstalledSkills: () => ({
-    data: [],
+    data: installedSkillsMock,
     isLoading: false,
   }),
   useInstallSkill: () => ({
@@ -131,6 +133,7 @@ describe("SkillsPage - skills.sh install (regression)", () => {
     installMutateAsyncMock.mockReset();
     installMutateAsyncMock.mockResolvedValue({});
     discoverableSkillsMock = [];
+    installedSkillsMock = [];
     skillReposMock = [];
     refetchDiscoverableMock.mockReset();
     searchCache.clear();
@@ -234,6 +237,50 @@ describe("SkillsPage - skills.sh install (regression)", () => {
     await user.click(searchButton);
 
     expect(screen.getByText("figma-use")).toBeInTheDocument();
+  });
+
+  it("lets Cometix install a skill that is already installed for official Claude", async () => {
+    discoverableSkillsMock = [makeDiscoverableSkill()];
+    skillReposMock = [makeSkillRepo()];
+    installedSkillsMock = [
+      {
+        id: "cc-switch-scope:v1:claude:repo-skill:owner-a:repo-a",
+        name: "Repo Skill",
+        description: "Official Claude copy",
+        directory: "repo-skill",
+        repoOwner: "owner-a",
+        repoName: "repo-a",
+        repoBranch: "main",
+        apps: {
+          claude: true,
+          "claude-cometix": false,
+          codex: false,
+          gemini: false,
+          opencode: false,
+          openclaw: false,
+          hermes: false,
+        },
+        installedAt: 1,
+        updatedAt: 1,
+      },
+    ];
+
+    render(<SkillsPage initialApp="claude-cometix" />);
+    const card = screen
+      .getByText("Repo Skill")
+      .closest("div.glass-card") as HTMLElement | null;
+    expect(card).not.toBeNull();
+
+    const installButton = within(card!).getByRole("button", {
+      name: "skills.install",
+    });
+    await userEvent.setup().click(installButton);
+
+    await waitFor(() => {
+      expect(installMutateAsyncMock).toHaveBeenCalledWith(
+        expect.objectContaining({ currentApp: "claude-cometix" }),
+      );
+    });
   });
 
   it("shows the skills.sh loading state while a new query is fetching", async () => {

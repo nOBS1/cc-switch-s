@@ -9,14 +9,14 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { GitFork, Monitor, MoreHorizontal, Terminal } from "lucide-react";
+import { isManagementApp } from "@/utils/forkPolicy";
+import { GitFork, MoreHorizontal, Terminal } from "lucide-react";
 
 const APP_BADGE_ICON: Partial<
   Record<AppId, { icon: typeof Terminal; offsetY?: number }>
 > = {
   claude: { icon: Terminal },
   "claude-cometix": { icon: GitFork },
-  "claude-desktop": { icon: Monitor, offsetY: 0.5 },
 };
 
 interface AppSwitcherProps {
@@ -28,7 +28,6 @@ interface AppSwitcherProps {
 const ALL_APPS: AppId[] = [
   "claude",
   "claude-cometix",
-  "claude-desktop",
   "codex",
   "gemini",
   "grokbuild",
@@ -119,6 +118,7 @@ export function AppSwitcher({
 
   // Filter apps based on visibility settings (default all visible)
   const appsToShow = ALL_APPS.filter((app) => {
+    if (!isManagementApp(app)) return false;
     if (!visibleApps) return true;
     return visibleApps[app];
   });

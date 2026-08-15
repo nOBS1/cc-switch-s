@@ -1,8 +1,9 @@
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, write_codex_live_atomic, AppError, AppType, McpApps,
-    McpServer, MultiAppConfig, Provider, ProviderMeta, ProviderService,
+    get_claude_cometix_settings_path, get_claude_settings_path, read_json_file,
+    write_codex_live_atomic, AppError, AppType, McpApps, McpServer, MultiAppConfig, Provider,
+    ProviderMeta, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -1818,8 +1819,12 @@ wire_api = "responses"
 
     let live_config =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
+    let proxy_port = futures::executor::block_on(state.db.get_proxy_config())
+        .expect("read proxy config")
+        .listen_port;
+    let expected_proxy_url = format!("http://127.0.0.1:{proxy_port}/v1");
     assert!(
-        live_config.contains("http://127.0.0.1:15721/v1"),
+        live_config.contains(&expected_proxy_url),
         "live config should remain pointed at the local proxy"
     );
     assert!(
@@ -2203,6 +2208,129 @@ fn provider_service_switch_claude_updates_live_and_state() {
     assert_eq!(
         legacy_provider.settings_config, legacy_live,
         "previous provider should receive backfilled live config"
+    );
+}
+
+#[test]
+fn provider_service_switch_cometix_migrates_live_before_backfill() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let official_path = get_claude_settings_path();
+    std::fs::create_dir_all(official_path.parent().expect("official config dir"))
+        .expect("create official config dir");
+    let official_sentinel = br#"{"official":"must-stay-byte-identical"}"#;
+    std::fs::write(&official_path, official_sentinel).expect("seed official settings");
+
+    let cometix_path = get_claude_cometix_settings_path();
+    std::fs::create_dir_all(cometix_path.parent().expect("Cometix config dir"))
+        .expect("create Cometix config dir");
+    std::fs::write(
+        &cometix_path,
+        serde_json::to_vec_pretty(&json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "stale-target-token",
+                "UNRELATED_STALE_ENV": "must-not-leak"
+            },
+            "theme": "dark",
+            "statusLine": {"type": "command", "command": "hl-status"}
+        }))
+        .expect("serialize Cometix settings"),
+    )
+    .expect("seed Cometix settings without provider credentials");
+
+    let legacy_path = home.join(".claude-cometix").join("settings.json");
+    std::fs::create_dir_all(legacy_path.parent().expect("legacy Cometix config dir"))
+        .expect("create legacy Cometix config dir");
+    std::fs::write(
+        &legacy_path,
+        serde_json::to_vec_pretty(&json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "legacy-file-token",
+                "ANTHROPIC_BASE_URL": "https://legacy.example.com"
+            }
+        }))
+        .expect("serialize legacy Cometix settings"),
+    )
+    .expect("seed legacy Cometix settings");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
+        manager.current = "provider-a".to_string();
+        manager.providers.insert(
+            "provider-a".to_string(),
+            Provider::with_id(
+                "provider-a".to_string(),
+                "Cometix A".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "provider-a-token",
+                        "ANTHROPIC_BASE_URL": "https://a.example.com"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "provider-b".to_string(),
+            Provider::with_id(
+                "provider-b".to_string(),
+                "Cometix B".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "provider-b-token",
+                        "ANTHROPIC_BASE_URL": "https://b.example.com"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&config).expect("create test state");
+
+    ProviderService::switch(&state, AppType::ClaudeCometix, "provider-b")
+        .expect("switch Cometix provider");
+
+    let providers = state
+        .db
+        .get_all_providers(AppType::ClaudeCometix.as_str())
+        .expect("read Cometix providers");
+    assert_eq!(
+        providers["provider-a"]
+            .settings_config
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(|value| value.as_str()),
+        Some("legacy-file-token"),
+        "the previous live file is authoritative for current-provider edits during migration"
+    );
+    assert!(
+        providers["provider-a"]
+            .settings_config
+            .pointer("/env/UNRELATED_STALE_ENV")
+            .is_none(),
+        "migration must replace provider-owned env instead of leaking stale live values"
+    );
+
+    let live: serde_json::Value =
+        read_json_file(&cometix_path).expect("read Cometix live settings");
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(|value| value.as_str()),
+        Some("provider-b-token")
+    );
+    assert_eq!(
+        live.get("theme").and_then(|value| value.as_str()),
+        Some("dark")
+    );
+    assert_eq!(
+        std::fs::read(&official_path).expect("read official settings"),
+        official_sentinel,
+        "Cometix migration and switch must not touch official Claude"
     );
 }
 

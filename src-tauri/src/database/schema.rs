@@ -4,6 +4,7 @@
 
 use super::{lock_conn, Database, SCHEMA_VERSION};
 use crate::error::AppError;
+use crate::proxy::types::DEFAULT_PROXY_PORT;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
@@ -129,7 +130,7 @@ impl Database {
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_config (
             app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
-            listen_port INTEGER NOT NULL DEFAULT 15721, enable_logging INTEGER NOT NULL DEFAULT 1,
+            listen_port INTEGER NOT NULL DEFAULT 15731, enable_logging INTEGER NOT NULL DEFAULT 1,
             enabled INTEGER NOT NULL DEFAULT 0, auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
             max_retries INTEGER NOT NULL DEFAULT 3, streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
             streaming_idle_timeout INTEGER NOT NULL DEFAULT 120, non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
@@ -148,39 +149,39 @@ impl Database {
         // - 旧表会在 apply_schema_migrations() 中迁移为三行结构后再插入。
         if Self::has_column(conn, "proxy_config", "app_type")? {
             conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
+                "INSERT OR IGNORE INTO proxy_config (app_type, listen_port, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('claude', 6, 90, 180, 600, 8, 3, 90, 0.7, 15)",
-                [],
+                VALUES ('claude', ?1, 6, 90, 180, 600, 8, 3, 90, 0.7, 15)",
+                [DEFAULT_PROXY_PORT],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
             conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
+                "INSERT OR IGNORE INTO proxy_config (app_type, listen_port, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('codex', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
-                [],
+                VALUES ('codex', ?1, 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+                [DEFAULT_PROXY_PORT],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
             conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
+                "INSERT OR IGNORE INTO proxy_config (app_type, listen_port, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('gemini', 5, 60, 120, 600, 4, 2, 60, 0.6, 10)",
-                [],
+                VALUES ('gemini', ?1, 5, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+                [DEFAULT_PROXY_PORT],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
             conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
+                "INSERT OR IGNORE INTO proxy_config (app_type, listen_port, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('grokbuild', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
-                [],
+                VALUES ('grokbuild', ?1, 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+                [DEFAULT_PROXY_PORT],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         }
@@ -356,7 +357,7 @@ impl Database {
             [],
         );
         let _ = conn.execute(
-            "ALTER TABLE proxy_config ADD COLUMN listen_port INTEGER NOT NULL DEFAULT 15721",
+            "ALTER TABLE proxy_config ADD COLUMN listen_port INTEGER NOT NULL DEFAULT 15731",
             [],
         );
         let _ = conn.execute(
@@ -519,6 +520,11 @@ impl Database {
                         Self::migrate_v16_to_v17(conn)?;
                         Self::set_user_version(conn, 17)?;
                     }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（使用 Cometix 独立代理端口）");
+                        Self::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -642,7 +648,7 @@ impl Database {
                 conn,
                 "proxy_config",
                 "listen_port",
-                "INTEGER NOT NULL DEFAULT 15721",
+                "INTEGER NOT NULL DEFAULT 15731",
             )?;
             Self::add_column_if_missing(
                 conn,
@@ -852,7 +858,7 @@ impl Database {
         conn.execute("CREATE TABLE proxy_config_new (
             app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
-            listen_port INTEGER NOT NULL DEFAULT 15721, enable_logging INTEGER NOT NULL DEFAULT 1,
+            listen_port INTEGER NOT NULL DEFAULT 15731, enable_logging INTEGER NOT NULL DEFAULT 1,
             enabled INTEGER NOT NULL DEFAULT 0, auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
             max_retries INTEGER NOT NULL DEFAULT 3, streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
             streaming_idle_timeout INTEGER NOT NULL DEFAULT 120, non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
@@ -1020,7 +1026,7 @@ impl Database {
             .map_err(|e| AppError::Database(format!("序列化旧 skills 快照失败: {e}")))?;
 
         // 标记：需要在启动后从文件系统扫描并重建 Skills 数据
-        // 说明：v3 结构将 Skills 的 SSOT 迁移到 ~/.cc-switch/skills/，
+        // 说明：v3 结构将 Skills 的 SSOT 迁移到 ~/.cc-switch-cometix/skills/，
         // 旧表只存“安装记录”，无法直接无损迁移到新结构，因此改为启动后扫描 app 目录导入。
         let _ = conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('skills_ssot_migration_pending', 'true')",
@@ -1415,7 +1421,7 @@ impl Database {
                 app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
                 proxy_enabled INTEGER NOT NULL DEFAULT 0,
                 listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
-                listen_port INTEGER NOT NULL DEFAULT 15721,
+                listen_port INTEGER NOT NULL DEFAULT 15731,
                 enable_logging INTEGER NOT NULL DEFAULT 1,
                 enabled INTEGER NOT NULL DEFAULT 0,
                 auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
@@ -1442,7 +1448,7 @@ impl Database {
             ("app_type", "'claude'"),
             ("proxy_enabled", "0"),
             ("listen_address", "'127.0.0.1'"),
-            ("listen_port", "15721"),
+            ("listen_port", "15731"),
             ("enable_logging", "1"),
             ("enabled", "0"),
             ("auto_failover_enabled", "0"),
@@ -1549,6 +1555,24 @@ impl Database {
                 "BOOLEAN NOT NULL DEFAULT 0",
             )?;
         }
+        Ok(())
+    }
+
+    /// v17 -> v18: move only the inherited upstream default to the fork port.
+    /// This runs once, so later user choices (including an explicit 15721) are
+    /// never rewritten. Ephemeral port 0 and every other custom port survive.
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_config")?
+            || !Self::has_column(conn, "proxy_config", "listen_port")?
+        {
+            return Ok(());
+        }
+
+        conn.execute(
+            "UPDATE proxy_config SET listen_port = ?1 WHERE listen_port = ?2",
+            params![DEFAULT_PROXY_PORT, 15721],
+        )
+        .map_err(|e| AppError::Database(format!("v17 -> v18 更新默认代理端口失败: {e}")))?;
         Ok(())
     }
 
@@ -3298,6 +3322,36 @@ mod tests {
         )?;
         assert_eq!(mcp_flags, (1, 0));
         assert_eq!(skill_flags, (1, 0));
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v17_to_v18_changes_only_the_upstream_default_proxy_port() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&conn)?;
+        conn.execute_batch(
+            "UPDATE proxy_config SET listen_port = 15721 WHERE app_type IN ('claude', 'grokbuild');
+             UPDATE proxy_config SET listen_port = 0 WHERE app_type = 'codex';
+             UPDATE proxy_config SET listen_port = 16001 WHERE app_type = 'gemini';",
+        )?;
+        Database::set_user_version(&conn, 17)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        for (app_type, expected_port) in [
+            ("claude", 15731),
+            ("codex", 0),
+            ("gemini", 16001),
+            ("grokbuild", 15731),
+        ] {
+            let actual_port: i64 = conn.query_row(
+                "SELECT listen_port FROM proxy_config WHERE app_type = ?1",
+                [app_type],
+                |row| row.get(0),
+            )?;
+            assert_eq!(actual_port, expected_port, "unexpected port for {app_type}");
+        }
         assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
         Ok(())
     }

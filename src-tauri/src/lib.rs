@@ -12,6 +12,7 @@ mod config;
 mod database;
 mod deeplink;
 mod error;
+mod fork_policy;
 mod gemini_config;
 mod gemini_mcp;
 mod grok_config;
@@ -232,7 +233,7 @@ fn handle_deeplink_url(
     focus_main_window: bool,
     source: &str,
 ) -> bool {
-    if !url_str.starts_with("ccswitch://") {
+    if !crate::deeplink::is_deeplink_url(url_str) {
         return false;
     }
 
@@ -324,7 +325,8 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
+    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log
+    // （默认 ~/.cc-switch-cometix/crash.log）
     panic_hook::setup_panic_hook();
 
     let mut builder = tauri::Builder::default();
@@ -625,6 +627,27 @@ pub fn run() {
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
             // ============================================================
 
+            // Early Cometix builds used `.claude-cometix`, but the isolated
+            // `hlclaude` launcher reads `.hlclaude`. Move auxiliary live
+            // assets before Skills/MCP/Prompt first-launch imports. The
+            // migration is target-wins, idempotent, and never deletes source.
+            match crate::services::cometix_migration::migrate_legacy_cometix_auxiliary_assets() {
+                Ok(outcome)
+                    if outcome.mcp_servers_added > 0
+                        || outcome.prompt_copied
+                        || outcome.skills_copied > 0 =>
+                {
+                    log::info!(
+                        "✓ Migrated legacy Cometix assets: mcp={}, prompt={}, skills={}",
+                        outcome.mcp_servers_added,
+                        outcome.prompt_copied,
+                        outcome.skills_copied
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("✗ Failed to migrate legacy Cometix assets: {error}"),
+            }
+
             // 1. 初始化默认 Skills 仓库（已有内置检查：表非空则跳过）
             match app_state.db.init_default_skill_repos() {
                 Ok(count) if count > 0 => {
@@ -675,6 +698,17 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to read skills migration flag: {e}"),
             }
 
+            // v17 initially added a Cometix enable flag to the shared Skill
+            // row. Split those legacy rows into independent official and
+            // Cometix snapshots before either live directory is synchronized.
+            match crate::services::skill::SkillService::migrate_claude_scopes(&app_state.db) {
+                Ok(count) if count > 0 => {
+                    log::info!("✓ Split {count} Claude/Cometix Skill scope(s)");
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("✗ Failed to split Claude Skill scopes: {error}"),
+            }
+
             // 1.5. 自动导入 live 配置 + seed 官方预设供应商（Claude / Codex / Gemini）
             //
             // 先 import 后 seed 是有意为之：先把用户手动配置的 settings.json / auth.json / .env
@@ -689,8 +723,21 @@ pub fn run() {
             let fresh_install_at_startup =
                 app_state.db.is_providers_empty().unwrap_or(false);
 
-            for app_type in
-                crate::app_config::AppType::all().filter(|t| !t.is_additive_mode())
+            // Earlier Cometix development builds projected live settings to
+            // `.claude-cometix`, while the real `hlclaude` launcher reads
+            // `.hlclaude`. Migrate before startup import/backfill so provider
+            // credentials cannot be replaced by an unauthenticated target.
+            match crate::services::provider::ProviderService::migrate_cometix_live_config_if_needed(
+                &app_state,
+            ) {
+                Ok(true) => log::info!("✓ Migrated Cometix live config to .hlclaude"),
+                Ok(false) => {}
+                Err(e) => log::warn!("✗ Failed to migrate Cometix live config: {e}"),
+            }
+
+            for app_type in crate::app_config::AppType::all().filter(|t| {
+                !t.is_additive_mode() && crate::fork_policy::app_management_allowed(t)
+            })
             {
                 if !crate::services::provider::should_import_default_config_on_startup(
                     &app_state,
@@ -895,6 +942,14 @@ pub fn run() {
                     Err(e) => log::warn!("✗ Failed to import Claude MCP: {e}"),
                 }
 
+                match crate::services::mcp::McpService::import_from_claude_cometix(&app_state) {
+                    Ok(count) if count > 0 => {
+                        log::info!("✓ Imported {count} MCP server(s) from Claude Code (Cometix)");
+                    }
+                    Ok(_) => log::debug!("○ No Claude Code (Cometix) MCP servers found to import"),
+                    Err(e) => log::warn!("✗ Failed to import Claude Code (Cometix) MCP: {e}"),
+                }
+
                 match crate::services::mcp::McpService::import_from_codex(&app_state) {
                     Ok(count) if count > 0 => {
                         log::info!("✓ Imported {count} MCP server(s) from Codex");
@@ -942,6 +997,7 @@ pub fn run() {
 
                 for app in [
                     crate::app_config::AppType::Claude,
+                    crate::app_config::AppType::ClaudeCometix,
                     crate::app_config::AppType::Codex,
                     crate::app_config::AppType::Gemini,
                     crate::app_config::AppType::GrokBuild,
@@ -978,12 +1034,16 @@ pub fn run() {
                 #[cfg(target_os = "linux")]
                 {
                     // Use Tauri's path API to get correct path (includes app identifier)
-                    // tauri-plugin-deep-link writes to: ~/.local/share/com.ccswitch.desktop/applications/cc-switch-handler.desktop
+                    // tauri-plugin-deep-link writes under the Cometix-specific
+                    // Tauri data directory (`com.ccswitch.cometix`).
                     // Only register if .desktop file doesn't exist to avoid overwriting user customizations
                     let should_register = app
                         .path()
                         .data_dir()
-                        .map(|d| !d.join("applications/cc-switch-handler.desktop").exists())
+                        .map(|d| {
+                            !d.join("applications/cc-switch-cometix-handler.desktop")
+                                .exists()
+                        })
                         .unwrap_or(true);
 
                     if should_register {
@@ -1038,7 +1098,7 @@ pub fn run() {
 
             // 构建托盘
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .tooltip("CC Switch") // 鼠标悬停提示
+                .tooltip("CC Switch Cometix") // 鼠标悬停提示
                 .on_tray_icon_event(|tray, event| match event {
                     // 鼠标悬停/点击到托盘图标时，后台异步刷新用量缓存，
                     // 让用户下一次（或快速打开菜单的那一刻）看到较新的数字。
@@ -1744,7 +1804,7 @@ pub fn run() {
                             url_for_log(&url_str)
                         );
 
-                        if url_str.starts_with("ccswitch://") {
+                        if crate::deeplink::is_deeplink_url(&url_str) {
                             if crate::lightweight::is_lightweight_mode() {
                                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
                                 {
@@ -1938,7 +1998,9 @@ fn initialize_common_config_snippets(state: &store::AppState) {
     // Auto-extract common config snippets from clean live files when snippet is missing.
     // This must run before proxy takeover is restored on startup, otherwise we'd read
     // proxy-placeholder configs instead of the user's actual live settings.
-    for app_type in crate::app_config::AppType::all() {
+    for app_type in
+        crate::app_config::AppType::all().filter(crate::fork_policy::app_management_allowed)
+    {
         if !state
             .db
             .should_auto_extract_config_snippet(app_type.as_str())

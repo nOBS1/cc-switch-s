@@ -5,6 +5,7 @@
 use super::utils::decode_base64_param;
 use super::DeepLinkImportRequest;
 use crate::error::AppError;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::prompt::Prompt;
 use crate::services::PromptService;
 use crate::store::AppState;
@@ -37,6 +38,7 @@ pub fn import_prompt_from_deeplink(
     // Parse app type
     let app_type = AppType::from_str(app_str)
         .map_err(|_| AppError::InvalidInput(format!("Invalid app type: {app_str}")))?;
+    ensure_app_management_allowed(&app_type)?;
 
     // Decode content
     let content_b64 = request

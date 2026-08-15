@@ -5,6 +5,7 @@
 use super::utils::{decode_base64_param, infer_homepage_from_endpoint};
 use super::DeepLinkImportRequest;
 use crate::error::AppError;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::provider::{ClaudeDesktopMode, Provider, ProviderMeta, UsageScript};
 use crate::services::ProviderService;
 use crate::store::AppState;
@@ -94,6 +95,7 @@ pub fn import_provider_from_deeplink(
     // Parse app type
     let app_type = AppType::from_str(&app_str)
         .map_err(|_| AppError::InvalidInput(format!("Invalid app type: {app_str}")))?;
+    ensure_app_management_allowed(&app_type)?;
 
     // Build provider configuration based on app type
     let mut provider = build_provider_from_request(&app_type, &merged_request)?;
@@ -643,7 +645,7 @@ pub fn parse_and_merge_config(
     }
 
     match request.app.as_deref().unwrap_or("") {
-        "claude" => merge_claude_config(&mut merged, &config_value)?,
+        "claude" | "claude-cometix" => merge_claude_config(&mut merged, &config_value)?,
         "codex" => merge_codex_config(&mut merged, &config_value)?,
         "gemini" => merge_gemini_config(&mut merged, &config_value)?,
         "grokbuild" => merge_grokbuild_config(&mut merged, &config_value)?,

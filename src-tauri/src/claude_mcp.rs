@@ -337,7 +337,7 @@ pub fn read_mcp_servers_map_at(
         return Ok(std::collections::HashMap::new());
     }
 
-    let root = read_json_value(&path)?;
+    let root = read_json_value(path)?;
     let servers = root
         .get("mcpServers")
         .and_then(|v| v.as_object())
@@ -362,14 +362,14 @@ pub fn set_mcp_servers_map_at(
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
     let mut root = if path.exists() {
-        read_json_value(&path)?
+        read_json_value(path)?
     } else {
         serde_json::json!({})
     };
 
     // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
     // 检测目标路径是否为 WSL，若是则跳过 cmd /c 包装
-    let is_wsl_target = is_wsl_path(&path);
+    let is_wsl_target = is_wsl_path(path);
     if is_wsl_target {
         log::info!("检测到 WSL 路径，跳过 cmd /c 包装: {}", path.display());
     }
@@ -414,7 +414,7 @@ pub fn set_mcp_servers_map_at(
         obj.insert("mcpServers".into(), Value::Object(out));
     }
 
-    write_json_value(&path, &root)?;
+    write_json_value(path, &root)?;
     Ok(())
 }
 

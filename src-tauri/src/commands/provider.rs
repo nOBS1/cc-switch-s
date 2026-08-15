@@ -5,6 +5,7 @@ use crate::app_config::AppType;
 use crate::commands::copilot::CopilotAuthState;
 use crate::commands::xai_oauth::XaiOAuthState;
 use crate::error::AppError;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::provider::{ClaudeDesktopMode, Provider};
 use crate::services::{
     EndpointLatency, ProviderService, ProviderSortUpdate, SpeedtestService, SwitchResult,
@@ -43,6 +44,7 @@ pub fn add_provider(
     #[allow(non_snake_case)] addToLive: Option<bool>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     ProviderService::add(state.inner(), app_type, provider, addToLive.unwrap_or(true))
         .map_err(|e| e.to_string())
 }
@@ -55,6 +57,7 @@ pub fn update_provider(
     #[allow(non_snake_case)] originalId: Option<String>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     ProviderService::update(state.inner(), app_type, originalId.as_deref(), provider)
         .map_err(|e| e.to_string())
 }
@@ -66,6 +69,7 @@ pub fn delete_provider(
     id: String,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     ProviderService::delete(state.inner(), app_type, &id)
         .map(|_| true)
         .map_err(|e| e.to_string())
@@ -78,6 +82,7 @@ pub fn remove_provider_from_live_config(
     id: String,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     ProviderService::remove_from_live_config(state.inner(), app_type, &id)
         .map(|_| true)
         .map_err(|e| e.to_string())
@@ -88,6 +93,7 @@ fn switch_provider_internal(
     app_type: AppType,
     id: &str,
 ) -> Result<SwitchResult, AppError> {
+    ensure_app_management_allowed(&app_type)?;
     ProviderService::switch(state, app_type, id)
 }
 
@@ -118,6 +124,8 @@ pub async fn switch_provider(
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
+    ensure_app_management_allowed(&app_type)?;
+
     if matches!(app_type, AppType::GrokBuild) {
         // 官方登录态（live 语法合法且无自定义模型表）+ 用户手动导入：
         // 导入的正确结果是让 Grok Official 成为当前供应商，而非报错。
@@ -184,6 +192,15 @@ fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result
         }
 
         ProviderService::migrate_legacy_common_config_usage_if_needed(state, app_type.clone())?;
+
+        // Cometix's explicit import reads the official Claude source file, so
+        // unlike a normal same-app import the destination live file does not
+        // already contain the imported credentials. Project the new current
+        // provider immediately so `hlclaude` can use it without an extra
+        // switch or application restart.
+        if matches!(app_type, AppType::ClaudeCometix) {
+            ProviderService::sync_current_provider_for_app(state, app_type.clone())?;
+        }
     }
 
     Ok(imported)
@@ -222,6 +239,8 @@ pub fn get_claude_desktop_default_routes(
 pub fn import_claude_desktop_providers_from_claude(
     state: State<'_, AppState>,
 ) -> Result<usize, String> {
+    ensure_app_management_allowed(&AppType::ClaudeDesktop).map_err(|e| e.to_string())?;
+
     let claude_providers = state
         .db
         .get_all_providers(AppType::Claude.as_str())
@@ -274,6 +293,7 @@ pub fn import_claude_desktop_providers_from_claude(
 
 #[tauri::command]
 pub fn ensure_claude_desktop_official_provider(state: State<'_, AppState>) -> Result<bool, String> {
+    ensure_app_management_allowed(&AppType::ClaudeDesktop).map_err(|e| e.to_string())?;
     state
         .db
         .ensure_official_seed_by_id(
@@ -819,6 +839,7 @@ pub fn add_custom_endpoint(
     url: String,
 ) -> Result<(), String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     ProviderService::add_custom_endpoint(state.inner(), app_type, &providerId, url)
         .map_err(|e| e.to_string())
 }
@@ -831,6 +852,7 @@ pub fn remove_custom_endpoint(
     url: String,
 ) -> Result<(), String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     ProviderService::remove_custom_endpoint(state.inner(), app_type, &providerId, url)
         .map_err(|e| e.to_string())
 }
@@ -843,6 +865,7 @@ pub fn update_endpoint_last_used(
     url: String,
 ) -> Result<(), String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     ProviderService::update_endpoint_last_used(state.inner(), app_type, &providerId, url)
         .map_err(|e| e.to_string())
 }
@@ -854,6 +877,7 @@ pub fn update_providers_sort_order(
     updates: Vec<ProviderSortUpdate>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
     ProviderService::update_sort_order(state.inner(), app_type, updates).map_err(|e| e.to_string())
 }
 

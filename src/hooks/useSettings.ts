@@ -108,6 +108,7 @@ export function useSettings(): UseSettingsResult {
     syncLanguage(initialLanguage);
     resetAllDirectories({
       claude: sanitizeDir(data?.claudeConfigDir),
+      "claude-cometix": sanitizeDir(data?.claudeCometixConfigDir),
       codex: sanitizeDir(data?.codexConfigDir),
       gemini: sanitizeDir(data?.geminiConfigDir),
       grokbuild: sanitizeDir(data?.grokConfigDir),
@@ -186,6 +187,9 @@ export function useSettings(): UseSettingsResult {
 
       try {
         const sanitizedClaudeDir = sanitizeDir(mergedSettings.claudeConfigDir);
+        const sanitizedClaudeCometixDir = sanitizeDir(
+          mergedSettings.claudeCometixConfigDir,
+        );
         const sanitizedCodexDir = sanitizeDir(mergedSettings.codexConfigDir);
         const sanitizedGeminiDir = sanitizeDir(mergedSettings.geminiConfigDir);
         const sanitizedGrokDir = sanitizeDir(mergedSettings.grokConfigDir);
@@ -204,6 +208,7 @@ export function useSettings(): UseSettingsResult {
         const payload: Settings = {
           ...restSettings,
           claudeConfigDir: sanitizedClaudeDir,
+          claudeCometixConfigDir: sanitizedClaudeCometixDir,
           codexConfigDir: sanitizedCodexDir,
           geminiConfigDir: sanitizedGeminiDir,
           grokConfigDir: sanitizedGrokDir,
@@ -319,6 +324,9 @@ export function useSettings(): UseSettingsResult {
       try {
         const sanitizedAppDir = sanitizeDir(appConfigDir);
         const sanitizedClaudeDir = sanitizeDir(mergedSettings.claudeConfigDir);
+        const sanitizedClaudeCometixDir = sanitizeDir(
+          mergedSettings.claudeCometixConfigDir,
+        );
         const sanitizedCodexDir = sanitizeDir(mergedSettings.codexConfigDir);
         const sanitizedGeminiDir = sanitizeDir(mergedSettings.geminiConfigDir);
         const sanitizedGrokDir = sanitizeDir(mergedSettings.grokConfigDir);
@@ -330,6 +338,9 @@ export function useSettings(): UseSettingsResult {
         );
         const previousAppDir = initialAppConfigDir;
         const previousClaudeDir = sanitizeDir(data?.claudeConfigDir);
+        const previousClaudeCometixDir = sanitizeDir(
+          data?.claudeCometixConfigDir,
+        );
         const previousCodexDir = sanitizeDir(data?.codexConfigDir);
         const previousGeminiDir = sanitizeDir(data?.geminiConfigDir);
         const previousGrokDir = sanitizeDir(data?.grokConfigDir);
@@ -344,6 +355,7 @@ export function useSettings(): UseSettingsResult {
         const payload: Settings = {
           ...restSettings,
           claudeConfigDir: sanitizedClaudeDir,
+          claudeCometixConfigDir: sanitizedClaudeCometixDir,
           codexConfigDir: sanitizedCodexDir,
           geminiConfigDir: sanitizedGeminiDir,
           grokConfigDir: sanitizedGrokDir,
@@ -431,6 +443,8 @@ export function useSettings(): UseSettingsResult {
         // 如果 Claude/Codex/Gemini/OpenCode/OpenClaw 的目录覆盖发生变化，则立即将"当前使用的供应商"写回对应应用的 live 配置
         // 如果插件同步已经执行过 syncCurrentProvidersLiveSafe，则跳过避免重复
         const claudeDirChanged = sanitizedClaudeDir !== previousClaudeDir;
+        const claudeCometixDirChanged =
+          sanitizedClaudeCometixDir !== previousClaudeCometixDir;
         const codexDirChanged = sanitizedCodexDir !== previousCodexDir;
         const geminiDirChanged = sanitizedGeminiDir !== previousGeminiDir;
         const grokDirChanged = sanitizedGrokDir !== previousGrokDir;
@@ -439,6 +453,7 @@ export function useSettings(): UseSettingsResult {
         if (
           !pluginSynced &&
           (claudeDirChanged ||
+            claudeCometixDirChanged ||
             codexDirChanged ||
             geminiDirChanged ||
             grokDirChanged ||

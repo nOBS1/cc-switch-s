@@ -2,10 +2,11 @@
 //!
 //! v3.10.0+ 统一管理架构：
 //! - 支持三应用开关（Claude/Codex/Gemini）
-//! - SSOT 存储在 ~/.cc-switch/skills/
+//! - SSOT 存储在 ~/.cc-switch-cometix/skills/
 
 use crate::app_config::{AppType, InstalledSkill, UnmanagedSkill};
 use crate::error::format_skill_error;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::services::skill::{
     DiscoverableSkill, ImportSkillSelection, MigrationResult, Skill, SkillBackupEntry, SkillRepo,
     SkillService, SkillStorageLocation, SkillUninstallResult, SkillUpdateInfo,
@@ -21,7 +22,9 @@ pub struct SkillServiceState(pub Arc<SkillService>);
 
 /// 解析 app 参数为 AppType
 fn parse_app_type(app: &str) -> Result<AppType, String> {
-    AppType::from_str(app).map_err(|e| e.to_string())
+    let app_type = AppType::from_str(app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
+    Ok(app_type)
 }
 
 // ========== 统一管理命令 ==========

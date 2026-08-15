@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::database::Database;
 use crate::error::AppError;
+use crate::fork_policy::app_management_allowed;
 use crate::provider::Provider;
 use crate::services::mcp::McpService;
 use crate::store::AppState;
@@ -29,6 +30,159 @@ fn claude_settings_path_for(app_type: &AppType) -> std::path::PathBuf {
         AppType::ClaudeCometix => get_claude_cometix_settings_path(),
         _ => get_claude_settings_path(),
     }
+}
+
+fn preserve_cometix_live_preferences_in_providers(
+    db: &Database,
+    live_settings: &Value,
+) -> Result<(), AppError> {
+    let Some(live_object) = live_settings.as_object() else {
+        return Ok(());
+    };
+
+    for provider in db
+        .get_all_providers(AppType::ClaudeCometix.as_str())?
+        .into_values()
+    {
+        let mut settings = provider.settings_config.clone();
+        let Some(settings_object) = settings.as_object_mut() else {
+            continue;
+        };
+        let mut changed = false;
+
+        for (key, value) in live_object {
+            // `env` contains the relay URL/token and therefore belongs to one
+            // provider. Everything else in a pre-existing hlclaude settings
+            // file is a local preference (theme, statusLine, hooks, etc.).
+            if key == "env"
+                || matches!(
+                    key.as_str(),
+                    "api_format" | "apiFormat" | "openrouter_compat_mode" | "openrouterCompatMode"
+                )
+            {
+                continue;
+            }
+
+            if !settings_object.contains_key(key) {
+                settings_object.insert(key.clone(), value.clone());
+                changed = true;
+            }
+        }
+
+        if changed {
+            db.update_provider_settings_config(
+                AppType::ClaudeCometix.as_str(),
+                &provider.id,
+                &settings,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn merge_cometix_provider_into_live(target: &mut Value, provider_settings: &Value) {
+    if let Some(target_object) = target.as_object_mut() {
+        // Authentication/routing is provider-owned. Removing the entire live
+        // env first prevents stale keys (including login-mode switches) from
+        // surviving just because the next provider does not define them.
+        target_object.remove("env");
+        for key in [
+            "api_format",
+            "apiFormat",
+            "openrouter_compat_mode",
+            "openrouterCompatMode",
+        ] {
+            target_object.remove(key);
+        }
+    }
+
+    json_deep_merge(target, provider_settings);
+}
+
+/// Project the current Cometix provider into the real `hlclaude` directory
+/// before any switch can backfill from that directory. Older development
+/// builds wrote `.claude-cometix`; `hlclaude` itself always reads `.hlclaude`.
+/// Existing `.hlclaude` fields are retained unless the selected provider owns
+/// the same field (provider credentials must win over an unauthenticated live
+/// file). The legacy file is copied from, never removed.
+pub(super) fn migrate_cometix_live_config_if_needed(state: &AppState) -> Result<bool, AppError> {
+    let target_config_dir = crate::config::get_claude_cometix_config_dir();
+    let target_config_dir_key = target_config_dir.to_string_lossy();
+    if crate::settings::get_cometix_hlclaude_live_v2_migration()
+        .is_some_and(|migration| migration.target_config_dir == target_config_dir_key.as_ref())
+    {
+        return Ok(false);
+    }
+
+    let app_type = AppType::ClaudeCometix;
+    let legacy_path = crate::config::get_home_dir()
+        .join(".claude-cometix")
+        .join("settings.json");
+    let target_path = target_config_dir.join("settings.json");
+    let mut merged = if target_path.exists() {
+        read_json_file(&target_path)?
+    } else {
+        json!({})
+    };
+
+    // hlclaude may already own UI/runtime preferences before CC Switch starts
+    // managing it. Seed those non-credential fields into every Cometix
+    // provider once, so the first provider switch does not erase them.
+    preserve_cometix_live_preferences_in_providers(&state.db, &merged)?;
+
+    let legacy_settings = if legacy_path.exists() {
+        Some(sanitize_claude_settings_for_live(&read_json_file(
+            &legacy_path,
+        )?))
+    } else {
+        None
+    };
+    let current_provider_id =
+        crate::settings::get_effective_current_provider(&state.db, &app_type)?;
+    let mut current_provider = match current_provider_id {
+        Some(id) => state.db.get_provider_by_id(&id, app_type.as_str())?,
+        None => None,
+    };
+
+    let source = if let Some(provider) = current_provider.as_mut() {
+        // The legacy file was the previous build's live source. Overlay its
+        // latest same-provider changes onto the DB copy without deleting DB
+        // credentials that the live file does not contain.
+        if let Some(legacy) = legacy_settings.as_ref() {
+            let backfill = strip_common_config_from_live_settings(
+                &state.db,
+                &app_type,
+                provider,
+                legacy.clone(),
+            );
+            json_deep_merge(&mut provider.settings_config, &backfill);
+            state.db.update_provider_settings_config(
+                app_type.as_str(),
+                &provider.id,
+                &provider.settings_config,
+            )?;
+        }
+
+        Some(sanitize_claude_settings_for_live(
+            &build_effective_settings_with_common_config(&state.db, &app_type, provider)?,
+        ))
+    } else {
+        legacy_settings
+    };
+
+    let Some(source) = source else {
+        crate::settings::mark_cometix_hlclaude_live_v2_migrated(&target_config_dir)?;
+        return Ok(false);
+    };
+    merge_cometix_provider_into_live(&mut merged, &source);
+
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+    }
+    write_json_file(&target_path, &merged)?;
+    crate::settings::mark_cometix_hlclaude_live_v2_migrated(&target_config_dir)?;
+    Ok(true)
 }
 
 /// ChatGPT Codex catalogs gpt-5.6 at a 372K context window with a ~353K
@@ -1287,7 +1441,7 @@ fn sync_current_provider_for_app_respecting_takeover(
 /// For additive mode apps (OpenCode), all providers are synced instead of just the current one.
 pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
     // Sync providers based on mode
-    for app_type in AppType::all() {
+    for app_type in AppType::all().filter(app_management_allowed) {
         if app_type.is_additive_mode() {
             // Additive mode: sync ALL providers
             sync_all_providers_to_live(state, &app_type)?;
@@ -1305,7 +1459,7 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
     let mcp_result = McpService::sync_all_enabled(state);
 
     // Skill sync
-    for app_type in AppType::all() {
+    for app_type in AppType::all().filter(app_management_allowed) {
         if let Err(e) = crate::services::skill::SkillService::sync_to_app(&state.db, &app_type) {
             log::warn!("同步 Skill 到 {app_type:?} 失败: {e}");
             // Continue syncing other apps, don't abort

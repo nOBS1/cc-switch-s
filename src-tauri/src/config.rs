@@ -6,6 +6,12 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::AppError;
 
+/// Modified-build application data directory.
+///
+/// Keep this distinct from upstream CC Switch's `.cc-switch` directory so the
+/// two applications never open, migrate, or back up the same database.
+pub const APP_CONFIG_DIR_NAME: &str = ".cc-switch-cometix";
+
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项
@@ -13,7 +19,8 @@ use crate::error::AppError;
 /// - `dirs::home_dir()` 在 Windows 上使用 `SHGetKnownFolderPath(FOLDERID_Profile)`，
 ///   返回的是真实用户目录（类似 `C:\\Users\\Alice`），与 v3.10.2 行为一致。
 /// - 不要直接使用 `HOME` 环境变量：它可能由 Git/Cygwin/MSYS 等第三方工具注入，
-///   且不一定等于用户目录，可能导致 `.cc-switch/cc-switch.db` 路径变化，从而“看起来像数据丢失”。
+///   且不一定等于用户目录，可能导致 `.cc-switch-cometix/cc-switch.db`
+///   路径变化，从而“看起来像数据丢失”。
 ///
 /// ## 测试隔离
 ///
@@ -44,10 +51,18 @@ pub fn get_claude_config_dir() -> PathBuf {
 
 /// 获取 Cometix Claude Code 的独立配置目录。
 ///
-/// 启动 Cometix 终端时会将该路径写入 `CLAUDE_CONFIG_DIR`，确保它不会读写
-/// 官方 Claude Code 使用的 `~/.claude`。
+/// `hlclaude` 启动器固定使用该目录，确保它不会读写官方 Claude Code 的
+/// `~/.claude` 数据。
+fn get_default_claude_cometix_config_dir() -> PathBuf {
+    get_home_dir().join(".hlclaude")
+}
+
 pub fn get_claude_cometix_config_dir() -> PathBuf {
-    get_home_dir().join(".claude-cometix")
+    if let Some(custom) = crate::settings::get_claude_cometix_override_dir() {
+        return custom;
+    }
+
+    get_default_claude_cometix_config_dir()
 }
 
 /// 默认 Claude MCP 配置文件路径 (~/.claude.json)
@@ -218,40 +233,21 @@ pub fn get_claude_cometix_settings_path() -> PathBuf {
     claude_settings_path_in(get_claude_cometix_config_dir())
 }
 
-/// 获取应用配置目录路径 (~/.cc-switch)
+/// 获取魔改版应用的默认配置目录路径 (`~/.cc-switch-cometix`)。
+pub fn get_default_app_config_dir() -> PathBuf {
+    get_home_dir().join(APP_CONFIG_DIR_NAME)
+}
+
+/// 获取应用配置目录路径（默认 `~/.cc-switch-cometix`）
 pub fn get_app_config_dir() -> PathBuf {
     if let Some(custom) = crate::app_store::get_app_config_dir_override() {
         return custom;
     }
 
-    let default_dir = get_home_dir().join(".cc-switch");
-
-    // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
-    // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
-    // 这里仅在“默认位置没有数据库”时回退到旧位置，避免再次出现“供应商消失”问题，
-    // 同时也避免新安装因为 `HOME` 被设置而写入非预期路径。
-    #[cfg(windows)]
-    {
-        let default_db = default_dir.join("cc-switch.db");
-        if !default_db.exists() {
-            if let Ok(home_env) = std::env::var("HOME") {
-                let trimmed = home_env.trim();
-                if !trimmed.is_empty() {
-                    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
-                    if legacy_dir.join("cc-switch.db").exists() {
-                        log::info!(
-                            "Detected v3.10.3 legacy database at {}, using it instead of {}",
-                            legacy_dir.display(),
-                            default_dir.display()
-                        );
-                        return legacy_dir;
-                    }
-                }
-            }
-        }
-    }
-
-    default_dir
+    // Deliberately do not fall back to upstream's historical `.cc-switch`
+    // locations. A fallback would allow this schema-newer fork to migrate the
+    // official application's database again.
+    get_default_app_config_dir()
 }
 
 /// 获取应用配置文件路径
@@ -492,17 +488,123 @@ mod tests {
     use super::*;
 
     #[test]
+    fn modified_app_uses_an_independent_default_data_root() {
+        assert_eq!(
+            get_app_config_dir(),
+            get_home_dir().join(".cc-switch-cometix")
+        );
+    }
+
+    #[test]
+    fn modified_app_uses_an_independent_tauri_identity() {
+        let tauri_config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json"))
+                .expect("tauri.conf.json should be valid JSON");
+
+        assert_eq!(tauri_config["productName"], "CC Switch Cometix");
+        assert_eq!(tauri_config["mainBinaryName"], "cc-switch-cometix");
+        assert_eq!(tauri_config["identifier"], "com.ccswitch.cometix");
+        assert_eq!(
+            tauri_config["plugins"]["deep-link"]["desktop"]["schemes"],
+            serde_json::json!(["ccswitch-cometix"])
+        );
+        assert_eq!(
+            tauri_config["plugins"]["updater"]["endpoints"],
+            serde_json::json!([
+                "https://github.com/nOBS1/cc-switch-s/releases/latest/download/latest.json"
+            ])
+        );
+
+        let info_plist = include_str!("../Info.plist");
+        assert!(info_plist.contains("<string>ccswitch-cometix</string>"));
+        assert!(!info_plist.contains("<string>ccswitch</string>"));
+
+        let flatpak_manifest = include_str!("../../flatpak/com.ccswitch.desktop.yml");
+        assert!(flatpak_manifest.starts_with("id: com.ccswitch.cometix\n"));
+        assert!(flatpak_manifest.contains("command: cc-switch-cometix"));
+        assert!(flatpak_manifest.contains("name: cc-switch-cometix"));
+        assert!(flatpak_manifest.contains("path: cc-switch-cometix.deb"));
+        assert!(!flatpak_manifest.contains("/com.ccswitch.desktop.desktop"));
+
+        let flatpak_desktop = include_str!("../../flatpak/com.ccswitch.desktop.desktop");
+        assert!(flatpak_desktop.contains("Exec=cc-switch-cometix %U"));
+        assert!(flatpak_desktop.contains("MimeType=x-scheme-handler/ccswitch-cometix;"));
+        assert!(!flatpak_desktop.contains("Exec=cc-switch\n"));
+
+        let flatpak_metainfo = include_str!("../../flatpak/com.ccswitch.desktop.metainfo.xml");
+        assert!(flatpak_metainfo.contains("<binary>cc-switch-cometix</binary>"));
+
+        let flatpak_readme = include_str!("../../flatpak/README.md");
+        assert!(flatpak_readme.contains("flatpak/cc-switch-cometix.deb"));
+        assert!(flatpak_readme.contains("./CC-Switch-Cometix-Linux.flatpak"));
+        assert!(flatpak_readme.contains("--filesystem=~/.cc-switch-cometix:create"));
+
+        let release_workflow = include_str!("../../.github/workflows/release.yml");
+        assert!(release_workflow.contains("$DMG_STAGE_DIR/CC Switch Cometix.app"));
+        assert!(release_workflow.contains("--volname \"CC Switch Cometix\""));
+        assert!(release_workflow.contains("--icon \"CC Switch Cometix.app\""));
+        assert!(release_workflow.contains("--hide-extension \"CC Switch Cometix.app\""));
+        assert!(!release_workflow.contains("$DMG_STAGE_DIR/CC Switch.app"));
+        assert!(release_workflow.contains("release/cc-switch-cometix.exe"));
+        assert!(!release_workflow.contains("release/cc-switch.exe"));
+        assert!(release_workflow.contains("CC-Switch-Cometix-${VERSION}-macOS.tar.gz"));
+        assert!(release_workflow.contains("CC-Switch-Cometix-$VERSION-Windows"));
+        assert!(release_workflow.contains("CC-Switch-Cometix-${VERSION}-Linux-${ARCH}.AppImage"));
+        assert!(release_workflow.contains("name: CC Switch Cometix ${{ github.ref_name }}"));
+        assert!(release_workflow.contains("## CC Switch Cometix ${{ github.ref_name }}"));
+        assert!(!release_workflow.contains("[ccswitch.io](https://ccswitch.io)"));
+
+        let cargo_manifest = include_str!("../Cargo.toml").replace("\r\n", "\n");
+        assert!(cargo_manifest.starts_with("[package]\nname = \"cc-switch-cometix\"\n"));
+        assert!(cargo_manifest.contains("repository = \"https://github.com/nOBS1/cc-switch-s\""));
+        assert!(!cargo_manifest.contains("https://github.com/farion1231/cc-switch"));
+
+        let cargo_lock = include_str!("../Cargo.lock").replace("\r\n", "\n");
+        assert!(
+            cargo_lock.contains("[[package]]\nname = \"cc-switch-cometix\"\nversion = \"3.19.2\"")
+        );
+
+        let linux_handler_source = include_str!("lib.rs");
+        assert!(linux_handler_source.contains("applications/cc-switch-cometix-handler.desktop"));
+        assert!(!linux_handler_source.contains("applications/cc-switch-handler.desktop"));
+
+        let windows_config = include_str!("../tauri.windows.conf.json");
+        assert!(windows_config.contains("\"title\": \"CC Switch Cometix\""));
+        assert!(linux_handler_source.contains(".tooltip(\"CC Switch Cometix\")"));
+
+        let about_source = include_str!("../../src/components/settings/AboutSection.tsx");
+        assert!(about_source.contains("https://github.com/nOBS1/cc-switch-s/releases"));
+        assert!(about_source.contains("https://github.com/nOBS1/cc-switch-s"));
+        assert!(!about_source.contains("https://github.com/farion1231/cc-switch"));
+        assert!(!about_source.contains("https://ccswitch.io"));
+        assert!(about_source.contains("CC Switch Cometix"));
+
+        let app_source = include_str!("../../src/App.tsx");
+        assert!(!app_source.contains("href=\"https://ccswitch.io\""));
+        assert!(app_source.contains("href=\"https://github.com/nOBS1/cc-switch-s\""));
+
+        let tray_source = include_str!("tray.rs");
+        assert!(!tray_source.contains("open_url(\"https://ccswitch.io\""));
+        assert!(tray_source.contains("https://github.com/nOBS1/cc-switch-s"));
+
+        let database_upgrade_source = include_str!("../../src/components/DatabaseUpgrade.tsx");
+        assert!(database_upgrade_source.contains("https://github.com/nOBS1/cc-switch-s/releases"));
+        assert!(!database_upgrade_source.contains("https://github.com/farion1231/cc-switch"));
+    }
+
+    #[test]
     fn cometix_paths_are_isolated_from_official_claude_paths() {
         let home = get_home_dir();
-        let cometix_dir = home.join(".claude-cometix");
-        assert_eq!(get_claude_cometix_config_dir(), cometix_dir);
+        let cometix_dir = home.join(".hlclaude");
+        assert_eq!(get_default_claude_cometix_config_dir(), cometix_dir);
+        let active_cometix_dir = get_claude_cometix_config_dir();
         assert_eq!(
             get_claude_cometix_settings_path().parent(),
-            Some(cometix_dir.as_path())
+            Some(active_cometix_dir.as_path())
         );
         assert_eq!(
             get_claude_cometix_mcp_path(),
-            cometix_dir.join(".claude.json")
+            active_cometix_dir.join(".claude.json")
         );
     }
 

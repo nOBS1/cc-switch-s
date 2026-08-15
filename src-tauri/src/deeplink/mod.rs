@@ -20,6 +20,17 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 
+/// Dedicated protocol registered by the fork. The legacy scheme remains
+/// parseable when a URL is passed directly, but is no longer registered with
+/// the OS and therefore cannot steal upstream CC Switch links.
+pub const DEEP_LINK_SCHEME: &str = "ccswitch-cometix";
+pub const LEGACY_DEEP_LINK_SCHEME: &str = "ccswitch";
+
+pub fn is_deeplink_url(value: &str) -> bool {
+    value.starts_with(&format!("{DEEP_LINK_SCHEME}://"))
+        || value.starts_with(&format!("{LEGACY_DEEP_LINK_SCHEME}://"))
+}
+
 // Re-export public API
 pub use mcp::import_mcp_from_deeplink;
 pub use parser::parse_deeplink_url;

@@ -1,3 +1,5 @@
+export const DEFAULT_PROXY_PORT = 15731;
+
 export interface ProxyConfig {
   listen_address: string;
   listen_port: number;

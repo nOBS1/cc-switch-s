@@ -28,8 +28,11 @@ pub fn reset_test_fs() {
     let home = ensure_test_home();
     for sub in [
         ".claude",
+        ".claude-cometix",
+        ".hlclaude",
         ".codex",
         ".cc-switch",
+        ".cc-switch-cometix",
         ".gemini",
         ".grok",
         ".config",

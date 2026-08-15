@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use crate::app_config::AppType;
@@ -107,8 +107,9 @@ pub struct WebDavSyncStatus {
 }
 
 fn default_remote_root() -> String {
-    "cc-switch-sync".to_string()
+    "cc-switch-cometix-sync".to_string()
 }
+const UPSTREAM_DEFAULT_REMOTE_ROOT: &str = "cc-switch-sync";
 fn default_profile() -> String {
     "default".to_string()
 }
@@ -174,7 +175,7 @@ impl WebDavSyncSettings {
         self.username = self.username.trim().to_string();
         self.remote_root = self.remote_root.trim().to_string();
         self.profile = self.profile.trim().to_string();
-        if self.remote_root.is_empty() {
+        if self.remote_root.is_empty() || self.remote_root == UPSTREAM_DEFAULT_REMOTE_ROOT {
             self.remote_root = default_remote_root();
         }
         if self.profile.is_empty() {
@@ -271,7 +272,7 @@ impl S3SyncSettings {
         self.endpoint = self.endpoint.trim().to_string();
         self.remote_root = self.remote_root.trim().to_string();
         self.profile = self.profile.trim().to_string();
-        if self.remote_root.is_empty() {
+        if self.remote_root.is_empty() || self.remote_root == UPSTREAM_DEFAULT_REMOTE_ROOT {
             self.remote_root = default_remote_root();
         }
         if self.profile.is_empty() {
@@ -303,6 +304,18 @@ pub struct LocalMigrations {
     /// 这样重新开启能把"关闭期间"落入 openai 桶的官方会话补迁进来。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_official_history_unify_v1: Option<CodexOfficialHistoryUnifyMigration>,
+    /// `.claude-cometix` -> `.hlclaude` 本机文件迁移标记。
+    ///
+    /// 目标目录参与标记，切换 Cometix override 后新目录仍会执行迁移。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cometix_hlclaude_live_v2: Option<CometixHlclaudeLiveMigration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CometixHlclaudeLiveMigration {
+    pub completed_at: String,
+    pub target_config_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,7 +358,8 @@ pub struct CodexOfficialHistoryUnifyMigration {
 
 /// 应用设置结构
 ///
-/// 存储设备级别设置，保存在本地 `~/.cc-switch/settings.json`，不随数据库同步。
+/// 存储设备级别设置，保存在本地
+/// `~/.cc-switch-cometix/settings.json`，不随数据库同步。
 /// 这确保了云同步场景下多设备可以独立运作。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -419,6 +433,9 @@ pub struct AppSettings {
     // ===== 设备级目录覆盖 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_config_dir: Option<String>,
+    /// Cometix Claude Code 的独立配置目录；不得复用官方 Claude override。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_cometix_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -539,6 +556,7 @@ impl Default for AppSettings {
             language: None,
             visible_apps: None,
             claude_config_dir: None,
+            claude_cometix_config_dir: None,
             codex_config_dir: None,
             gemini_config_dir: None,
             grok_config_dir: None,
@@ -570,11 +588,7 @@ impl Default for AppSettings {
 impl AppSettings {
     fn settings_path() -> Option<PathBuf> {
         // settings.json 保留用于旧版本迁移和无数据库场景
-        Some(
-            crate::config::get_home_dir()
-                .join(".cc-switch")
-                .join("settings.json"),
-        )
+        Some(crate::config::get_app_config_dir().join("settings.json"))
     }
 
     fn normalize_paths(&mut self) {
@@ -584,6 +598,21 @@ impl AppSettings {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
+
+        self.claude_cometix_config_dir = self
+            .claude_cometix_config_dir
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        if validate_claude_directory_isolation(self).is_err() {
+            log::error!(
+                "检测到 Claude/Cometix 配置目录相互重合或侵入应用数据目录，已恢复各自独立的默认目录"
+            );
+            self.claude_config_dir = None;
+            self.claude_cometix_config_dir = None;
+        }
 
         self.codex_config_dir = self
             .codex_config_dir
@@ -674,6 +703,64 @@ impl AppSettings {
     }
 }
 
+fn effective_claude_directory(raw: Option<&String>, default_folder: &str) -> PathBuf {
+    raw.map(|value| crate::app_store::resolve_path(value.trim()))
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| crate::config::get_home_dir().join(default_folder))
+}
+
+fn effective_claude_directories(settings: &AppSettings) -> (PathBuf, PathBuf) {
+    let official = effective_claude_directory(settings.claude_config_dir.as_ref(), ".claude");
+    let cometix =
+        effective_claude_directory(settings.claude_cometix_config_dir.as_ref(), ".hlclaude");
+    (official, cometix)
+}
+
+fn validate_claude_directories_against_app_root(
+    settings: &AppSettings,
+    app_root: &Path,
+) -> Result<(), AppError> {
+    let (official, cometix) = effective_claude_directories(settings);
+    if [&official, &cometix]
+        .into_iter()
+        .any(|claude_dir| crate::app_store::paths_overlap(claude_dir, app_root))
+    {
+        return Err(AppError::localized(
+            "settings.claude_dir.app_data_conflict",
+            "Claude 与 Cometix 的配置目录不能与 CC Switch 应用数据目录重合或相互嵌套",
+            "Claude and Cometix configuration directories cannot overlap a CC Switch application data directory.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_claude_directory_isolation(settings: &AppSettings) -> Result<(), AppError> {
+    let (official, cometix) = effective_claude_directories(settings);
+    if crate::app_store::paths_overlap(&official, &cometix) {
+        return Err(AppError::localized(
+            "settings.claude_cometix_dir.conflict",
+            "Claude Code（Cometix）的配置目录不能与官方 Claude Code 相同或相互嵌套",
+            "Claude Code (Cometix) and official Claude Code configuration directories cannot be the same or nested inside each other.",
+        ));
+    }
+    validate_claude_directories_against_app_root(
+        settings,
+        &crate::config::get_home_dir().join(".cc-switch"),
+    )?;
+    validate_claude_directories_against_app_root(settings, &crate::config::get_app_config_dir())?;
+    Ok(())
+}
+
+/// Runtime guard for changing the fork's app-data root. The Store startup
+/// reader intentionally cannot consult settings (initialization order); the
+/// interactive setter can and must protect the currently live custom Claude
+/// directories before switching roots.
+pub(crate) fn validate_app_config_dir_against_current_claude_directories(
+    app_root: &Path,
+) -> Result<(), AppError> {
+    validate_claude_directories_against_app_root(&get_settings(), app_root)
+}
+
 fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
     let mut normalized = settings.clone();
     normalized.normalize_paths();
@@ -759,6 +846,7 @@ pub fn get_settings_for_frontend() -> AppSettings {
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
+    validate_claude_directory_isolation(&new_settings)?;
     new_settings.normalize_paths();
     save_settings_file(&new_settings)?;
 
@@ -828,6 +916,28 @@ pub fn mark_codex_provider_template_migrated(
     })
 }
 
+/// 获取 `.hlclaude` 本机迁移标记。
+pub fn get_cometix_hlclaude_live_v2_migration() -> Option<CometixHlclaudeLiveMigration> {
+    get_settings()
+        .local_migrations
+        .as_ref()
+        .and_then(|migrations| migrations.cometix_hlclaude_live_v2.clone())
+}
+
+/// 标记指定 Cometix 配置目录已完成本机迁移。
+pub fn mark_cometix_hlclaude_live_v2_migrated(target_config_dir: &Path) -> Result<(), AppError> {
+    let target_config_dir = target_config_dir.to_string_lossy().to_string();
+    mutate_settings(|settings| {
+        let migrations = settings
+            .local_migrations
+            .get_or_insert_with(Default::default);
+        migrations.cometix_hlclaude_live_v2 = Some(CometixHlclaudeLiveMigration {
+            completed_at: chrono::Utc::now().to_rfc3339(),
+            target_config_dir,
+        });
+    })
+}
+
 /// 统一会话迁移标记是否覆盖指定目录。标记里没记目录（不应出现的旧格式）
 /// 视为不匹配——重跑迁移是幂等的，宁可重迁也不漏迁。
 pub fn is_codex_official_history_unify_migrated_for_dir(codex_dir: &str) -> bool {
@@ -894,6 +1004,14 @@ pub fn get_claude_override_dir() -> Option<PathBuf> {
     let settings = settings_store().read().ok()?;
     settings
         .claude_config_dir
+        .as_ref()
+        .map(|p| resolve_override_path(p))
+}
+
+pub fn get_claude_cometix_override_dir() -> Option<PathBuf> {
+    let settings = settings_store().read().ok()?;
+    settings
+        .claude_cometix_config_dir
         .as_ref()
         .map(|p| resolve_override_path(p))
 }
@@ -1162,6 +1280,154 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+
+    #[test]
+    fn cometix_directory_override_is_normalized_independently() {
+        let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "claudeConfigDir": " /profiles/official ",
+            "claudeCometixConfigDir": " /profiles/cometix "
+        }))
+        .expect("deserialize settings");
+
+        settings.normalize_paths();
+        let serialized = serde_json::to_value(settings).expect("serialize settings");
+
+        assert_eq!(serialized["claudeConfigDir"], "/profiles/official");
+        assert_eq!(serialized["claudeCometixConfigDir"], "/profiles/cometix");
+    }
+
+    #[test]
+    fn claude_and_cometix_directory_aliases_are_rejected() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let shared = temp.path().join("shared");
+        std::fs::create_dir_all(&shared).expect("create shared dir");
+        let settings = AppSettings {
+            claude_config_dir: Some(shared.to_string_lossy().to_string()),
+            claude_cometix_config_dir: Some(shared.join(".").to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        assert!(validate_claude_directory_isolation(&settings).is_err());
+    }
+
+    #[test]
+    fn claude_and_cometix_nested_directories_are_rejected_in_both_directions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let official = temp.path().join("official");
+        let cometix = temp.path().join("cometix");
+
+        let cometix_inside_official = AppSettings {
+            claude_config_dir: Some(official.to_string_lossy().to_string()),
+            claude_cometix_config_dir: Some(official.join("skills").to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        assert!(validate_claude_directory_isolation(&cometix_inside_official).is_err());
+
+        let official_inside_cometix = AppSettings {
+            claude_config_dir: Some(cometix.join("official").to_string_lossy().to_string()),
+            claude_cometix_config_dir: Some(cometix.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        assert!(validate_claude_directory_isolation(&official_inside_cometix).is_err());
+    }
+
+    #[test]
+    fn claude_directories_cannot_overlap_upstream_or_fork_app_data() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let separate_cometix = temp.path().join("cometix");
+
+        let inside_upstream = AppSettings {
+            claude_config_dir: Some(
+                crate::config::get_home_dir()
+                    .join(".cc-switch/claude-state")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            claude_cometix_config_dir: Some(separate_cometix.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        assert!(validate_claude_directory_isolation(&inside_upstream).is_err());
+
+        let fork_root = crate::config::get_app_config_dir();
+        let inside_fork = AppSettings {
+            claude_config_dir: Some(
+                fork_root
+                    .join("official-state")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            claude_cometix_config_dir: Some(separate_cometix.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        assert!(
+            validate_claude_directory_isolation(&inside_fork).is_err(),
+            "a Claude directory inside the fork app root must be rejected"
+        );
+    }
+
+    #[test]
+    fn prospective_app_root_cannot_overlap_current_claude_directories() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let official = temp.path().join("official");
+        let cometix = temp.path().join("cometix");
+        let settings = AppSettings {
+            claude_config_dir: Some(official.to_string_lossy().to_string()),
+            claude_cometix_config_dir: Some(cometix.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        assert!(validate_claude_directories_against_app_root(
+            &settings,
+            &official.join("app-data")
+        )
+        .is_err());
+        assert!(validate_claude_directories_against_app_root(&settings, temp.path()).is_err());
+        assert!(validate_claude_directories_against_app_root(
+            &settings,
+            &temp.path().join("separate-app-data")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn cloned_upstream_sync_defaults_move_to_the_fork_namespace() {
+        let mut webdav = WebDavSyncSettings {
+            remote_root: UPSTREAM_DEFAULT_REMOTE_ROOT.to_string(),
+            ..Default::default()
+        };
+        webdav.normalize();
+        assert_eq!(webdav.remote_root, "cc-switch-cometix-sync");
+
+        let mut s3 = S3SyncSettings {
+            remote_root: UPSTREAM_DEFAULT_REMOTE_ROOT.to_string(),
+            ..Default::default()
+        };
+        s3.normalize();
+        assert_eq!(s3.remote_root, "cc-switch-cometix-sync");
+
+        webdav.remote_root = "my-private-root".to_string();
+        webdav.normalize();
+        assert_eq!(webdav.remote_root, "my-private-root");
+    }
+
+    #[test]
+    fn cometix_live_migration_marker_keeps_target_directory() {
+        let migrations: LocalMigrations = serde_json::from_value(serde_json::json!({
+            "cometixHlclaudeLiveV2": {
+                "completedAt": "2026-08-15T00:00:00Z",
+                "targetConfigDir": "/profiles/cometix"
+            }
+        }))
+        .expect("deserialize local migration marker");
+
+        assert_eq!(
+            migrations
+                .cometix_hlclaude_live_v2
+                .expect("Cometix marker")
+                .target_config_dir,
+            "/profiles/cometix"
+        );
+    }
 
     #[test]
     fn visible_apps_old_settings_default_claude_desktop_visible() {

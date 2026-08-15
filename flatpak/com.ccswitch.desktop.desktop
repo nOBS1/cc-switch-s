@@ -1,9 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=CC Switch
+Name=CC Switch Cometix
 Comment=All-in-One Assistant for Claude Code, Codex & Gemini CLI
-Exec=cc-switch
-Icon=com.ccswitch.desktop
+Exec=cc-switch-cometix %U
+Icon=com.ccswitch.cometix
 Terminal=false
 Categories=Utility;Development;
+MimeType=x-scheme-handler/ccswitch-cometix;
 StartupNotify=true

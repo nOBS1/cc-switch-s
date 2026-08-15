@@ -85,6 +85,18 @@ export const getSkillsPageHeaderActions = (source: SkillsPageSource) =>
   );
 
 const SKILLSSH_PAGE_SIZE = 20;
+const OFFICIAL_CLAUDE_SKILL_ID_PREFIX = "cc-switch-scope:v1:claude:";
+const COMETIX_CLAUDE_SKILL_ID_PREFIX = "cc-switch-scope:v1:claude-cometix:";
+
+function isInstalledInCurrentClaudeScope(id: string, app: AppId): boolean {
+  if (app === "claude") {
+    return !id.startsWith(COMETIX_CLAUDE_SKILL_ID_PREFIX);
+  }
+  if (app === "claude-cometix") {
+    return !id.startsWith(OFFICIAL_CLAUDE_SKILL_ID_PREFIX);
+  }
+  return true;
+}
 
 /**
  * Skills 发现面板
@@ -160,14 +172,18 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
     const installedKeys = useMemo(() => {
       if (!installedSkills) return new Set<string>();
       return new Set(
-        installedSkills.map((s) => {
-          // 构建唯一 key：directory + repoOwner + repoName
-          const owner = s.repoOwner?.toLowerCase() || "";
-          const name = s.repoName?.toLowerCase() || "";
-          return `${s.directory.toLowerCase()}:${owner}:${name}`;
-        }),
+        installedSkills
+          .filter((skill) =>
+            isInstalledInCurrentClaudeScope(skill.id, currentApp),
+          )
+          .map((s) => {
+            // 构建唯一 key：directory + repoOwner + repoName
+            const owner = s.repoOwner?.toLowerCase() || "";
+            const name = s.repoName?.toLowerCase() || "";
+            return `${s.directory.toLowerCase()}:${owner}:${name}`;
+          }),
       );
-    }, [installedSkills]);
+    }, [currentApp, installedSkills]);
 
     type DiscoverableSkillItem = DiscoverableSkill & { installed: boolean };
 

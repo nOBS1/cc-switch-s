@@ -24,6 +24,7 @@ import { parseSmartMcpJson } from "@/utils/formatters";
 import { useMcpValidation } from "./useMcpValidation";
 import { useUpsertMcpServer } from "@/hooks/useMcp";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
+import { getMcpLiveId } from "@/utils/mcpStorageId";
 
 interface McpFormModalProps {
   editingId?: string;
@@ -50,8 +51,8 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
 
   const upsertMutation = useUpsertMcpServer();
 
-  const [formId, setFormId] = useState(
-    () => editingId || initialData?.id || "",
+  const [formId, setFormId] = useState(() =>
+    getMcpLiveId(initialData?.id || editingId || ""),
   );
   const [formName, setFormName] = useState(initialData?.name || "");
   const [formDescription, setFormDescription] = useState(
@@ -371,7 +372,9 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
 
       const entry: McpServer = {
         ...(initialData ? { ...initialData } : {}),
-        id: trimmedId,
+        // Editing keeps the opaque database identity, while the disabled ID
+        // field shows the decoded live id to the user.
+        id: isEditing && editingId ? editingId : trimmedId,
         name: finalName,
         server: serverSpec,
         apps: enabledApps,

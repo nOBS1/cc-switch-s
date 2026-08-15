@@ -8,6 +8,7 @@ use tauri::State;
 
 use crate::app_config::AppType;
 use crate::claude_mcp;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::services::McpService;
 use crate::store::AppState;
 
@@ -47,7 +48,7 @@ pub struct McpConfigResponse {
     pub servers: HashMap<String, serde_json::Value>,
 }
 
-/// 获取 MCP 配置（来自 ~/.cc-switch/config.json）
+/// 获取 MCP 配置（来自 ~/.cc-switch-cometix/config.json）
 use std::str::FromStr;
 
 #[tauri::command]
@@ -80,6 +81,7 @@ pub async fn upsert_mcp_server_in_config(
     use crate::app_config::McpServer;
 
     let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_ty).map_err(|e| e.to_string())?;
 
     // 读取现有的服务器（如果存在）
     let existing_server = {
@@ -134,9 +136,11 @@ pub async fn upsert_mcp_server_in_config(
 #[tauri::command]
 pub async fn delete_mcp_server_in_config(
     state: State<'_, AppState>,
-    _app: String, // 参数保留用于向后兼容，但在统一结构中不再需要
+    app: String, // 参数保留用于向后兼容；仍用于执行 fork 隔离策略
     id: String,
 ) -> Result<bool, String> {
+    let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_ty).map_err(|e| e.to_string())?;
     McpService::delete_server(&state, &id).map_err(|e| e.to_string())
 }
 
@@ -150,6 +154,7 @@ pub async fn set_mcp_enabled(
     enabled: bool,
 ) -> Result<bool, String> {
     let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_ty).map_err(|e| e.to_string())?;
     McpService::set_enabled(&state, app_ty, &id, enabled).map_err(|e| e.to_string())
 }
 
@@ -191,6 +196,7 @@ pub async fn toggle_mcp_app(
     enabled: bool,
 ) -> Result<(), String> {
     let app_ty = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_ty).map_err(|e| e.to_string())?;
     McpService::toggle_app(&state, &server_id, app_ty, enabled).map_err(|e| e.to_string())
 }
 

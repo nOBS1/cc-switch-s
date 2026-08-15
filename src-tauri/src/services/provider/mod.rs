@@ -1805,7 +1805,10 @@ requires_openai_auth = true
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!(
+                "http://127.0.0.1:{}/claude-desktop",
+                crate::proxy::types::DEFAULT_PROXY_PORT
+            )),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
@@ -2965,7 +2968,18 @@ impl ProviderService {
     ///    e. Sync MCP configuration
     pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
         // Check if provider exists
-        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let mut providers = state.db.get_all_providers(app_type.as_str())?;
+        if !providers.contains_key(id) {
+            return Err(AppError::Message(format!("供应商 {id} 不存在")));
+        }
+
+        if matches!(app_type, AppType::ClaudeCometix) {
+            live::migrate_cometix_live_config_if_needed(state)?;
+            // Migration may seed hlclaude preferences into provider rows.
+            // Reload before switch_normal writes the selected provider.
+            providers = state.db.get_all_providers(app_type.as_str())?;
+        }
+
         let _provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
@@ -4056,6 +4070,11 @@ impl ProviderService {
         state: &AppState,
     ) -> Result<bool, AppError> {
         live::import_official_claude_config_as_cometix_default(state)
+    }
+
+    /// One-time projection from the legacy development path into `.hlclaude`.
+    pub fn migrate_cometix_live_config_if_needed(state: &AppState) -> Result<bool, AppError> {
+        live::migrate_cometix_live_config_if_needed(state)
     }
 
     pub fn should_import_default_config_on_startup(

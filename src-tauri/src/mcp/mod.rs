@@ -21,8 +21,9 @@ mod validation;
 
 // 重新导出公共 API
 pub use claude::{
-    import_from_claude, remove_server_from_claude, remove_server_from_claude_cometix,
-    sync_enabled_to_claude, sync_single_server_to_claude, sync_single_server_to_claude_cometix,
+    import_from_claude, import_from_claude_cometix, remove_server_from_claude,
+    remove_server_from_claude_cometix, sync_enabled_to_claude, sync_single_server_to_claude,
+    sync_single_server_to_claude_cometix,
 };
 pub use codex::{
     import_from_codex, remove_server_from_codex, sync_enabled_to_codex, sync_single_server_to_codex,

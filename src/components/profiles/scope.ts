@@ -8,7 +8,6 @@ import type { PerApp, Profile, ProfileScope } from "@/lib/api/profiles";
  */
 export const APP_PROFILE_SCOPE: Partial<Record<AppId, ProfileScope>> = {
   claude: "claude",
-  "claude-desktop": "claude-desktop",
   codex: "codex",
 };
 

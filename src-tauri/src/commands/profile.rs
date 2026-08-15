@@ -4,6 +4,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
 use crate::database::Profile;
+use crate::fork_policy::ensure_profile_scope_management_allowed;
 use crate::services::profile::{ProfilePayload, ProfileScope, ProfileService};
 use crate::store::AppState;
 
@@ -122,6 +123,7 @@ pub fn create_profile(
     scope: String,
 ) -> Result<ProfileDto, String> {
     let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
+    ensure_profile_scope_management_allowed(scope).map_err(|e| e.to_string())?;
     ProfileService::create(&state, &name, scope)
         .map(ProfileDto::from)
         .map_err(|e| e.to_string())
@@ -139,6 +141,9 @@ pub fn update_profile(
         .map(|s| ProfileScope::parse(&s))
         .transpose()
         .map_err(|e| e.to_string())?;
+    if let Some(scope) = scope {
+        ensure_profile_scope_management_allowed(scope).map_err(|e| e.to_string())?;
+    }
     ProfileService::update(&state, &id, name, resnapshot.unwrap_or(false), scope)
         .map(ProfileDto::from)
         .map_err(|e| e.to_string())
@@ -152,6 +157,7 @@ pub fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), Stri
 #[tauri::command]
 pub fn clear_current_profile(state: State<'_, AppState>, scope: String) -> Result<(), String> {
     let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
+    ensure_profile_scope_management_allowed(scope).map_err(|e| e.to_string())?;
     state
         .db
         .set_current_profile_id(scope.as_str(), None)
@@ -170,6 +176,7 @@ pub fn apply_profile(
     scope: String,
 ) -> Result<Vec<String>, String> {
     let scope = ProfileScope::parse(&scope).map_err(|e| e.to_string())?;
+    ensure_profile_scope_management_allowed(scope).map_err(|e| e.to_string())?;
     let (warnings, should_stop_proxy) =
         ProfileService::apply(&state, &id, scope).map_err(|e| e.to_string())?;
 

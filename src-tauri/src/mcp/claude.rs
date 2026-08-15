@@ -119,6 +119,67 @@ pub fn import_from_claude(config: &mut MultiAppConfig) -> Result<usize, AppError
     Ok(changed)
 }
 
+/// 从 Cometix 独立配置域的 ~/.hlclaude/.claude.json 导入 mcpServers。
+/// 已存在的服务器仅启用 Cometix，不修改官方 Claude 或其他应用状态。
+pub fn import_from_claude_cometix(config: &mut MultiAppConfig) -> Result<usize, AppError> {
+    let path = crate::config::get_claude_cometix_mcp_path();
+    let map = crate::claude_mcp::read_mcp_servers_map_at(&path)?;
+    let servers = config.mcp.servers.get_or_insert_with(HashMap::new);
+
+    let mut changed = 0;
+    let mut errors = Vec::new();
+
+    for (id, spec) in map {
+        if let Err(e) = validate_server_spec(&spec) {
+            log::warn!("跳过无效 Cometix MCP 服务器 '{id}': {e}");
+            errors.push(format!("{id}: {e}"));
+            continue;
+        }
+
+        if let Some(existing) = servers.get_mut(&id) {
+            if !existing.apps.claude_cometix {
+                existing.apps.claude_cometix = true;
+                changed += 1;
+                log::info!("MCP 服务器 '{id}' 已启用 Claude Code (Cometix) 应用");
+            }
+        } else {
+            servers.insert(
+                id.clone(),
+                McpServer {
+                    id: id.clone(),
+                    name: id.clone(),
+                    server: spec,
+                    apps: McpApps {
+                        claude: false,
+                        claude_cometix: true,
+                        codex: false,
+                        gemini: false,
+                        grokbuild: false,
+                        opencode: false,
+                        hermes: false,
+                    },
+                    description: None,
+                    homepage: None,
+                    docs: None,
+                    tags: Vec::new(),
+                },
+            );
+            changed += 1;
+            log::info!("导入新 Cometix MCP 服务器 '{id}'");
+        }
+    }
+
+    if !errors.is_empty() {
+        log::warn!(
+            "Cometix MCP 导入完成，但有 {} 项失败: {:?}",
+            errors.len(),
+            errors
+        );
+    }
+
+    Ok(changed)
+}
+
 /// 将单个 MCP 服务器同步到 Claude live 配置
 pub fn sync_single_server_to_claude(
     _config: &MultiAppConfig,

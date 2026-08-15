@@ -1,18 +1,17 @@
 <div align="center">
 
-# CC Switch
+# CC Switch Cometix
 
-### Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes Agent 的全方位管理工具
+### Claude Code（官方版与 Cometix）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes Agent 的全方位管理工具
 
-[![Version](https://img.shields.io/github/v/release/farion1231/cc-switch?color=blue&label=version)](https://github.com/farion1231/cc-switch/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/farion1231/cc-switch/releases)
+[![Version](https://img.shields.io/github/v/release/nOBS1/cc-switch-s?color=blue&label=version)](https://github.com/nOBS1/cc-switch-s/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/nOBS1/cc-switch-s/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
-[![Downloads](https://img.shields.io/github/downloads/farion1231/cc-switch/total)](https://github.com/farion1231/cc-switch/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/nOBS1/cc-switch-s/total)](https://github.com/nOBS1/cc-switch-s/releases/latest)
 
-<a href="https://trendshift.io/repositories/15372" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15372" alt="farion1231%2Fcc-switch | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-<a href="https://www.star-history.com/#farion1231/cc-switch&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=farion1231/cc-switch&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=farion1231/cc-switch" width="196" height="55" /></picture></a>
+<a href="https://www.star-history.com/#nOBS1/cc-switch-s&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=nOBS1/cc-switch-s&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=nOBS1/cc-switch-s" width="196" height="55" /></picture></a>
 
-### 🌐 唯一官方网站：**[ccswitch.io](https://ccswitch.io)**
+### 🌐 项目仓库：**[nOBS1/cc-switch-s](https://github.com/nOBS1/cc-switch-s)**
 
 [English](README.md) | 中文 | [日本語](README_JA.md) | [Deutsch](README_DE.md) | [更新日志](CHANGELOG.md)
 
@@ -20,7 +19,7 @@
 
 ## ❤️赞助商
 
-> [想出现在这里？](mailto:farion1231@gmail.com)
+> [想支持这个分支？](https://github.com/nOBS1/cc-switch-s/issues)
 
 <details open>
 <summary>点击折叠</summary>
@@ -198,11 +197,11 @@ TeamoRouter 还提供企业级功能，包括集中账单、团队管理、BYOK�
 
 ## 为什么选择 CC Switch？
 
-现代 AI 编程依赖于 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes 等工具——但每个工具都有自己的配置格式。切换 API 供应商意味着手动编辑 JSON、TOML 或 `.env` 文件，而在多个工具之间缺乏一个统一管理 MCP, SKILLS 的方式。
+现代 AI 编程依赖于 Claude Code、Claude Code（Cometix）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes 等工具——但每个工具都有自己的配置格式。切换 API 供应商意味着手动编辑 JSON、TOML 或 `.env` 文件，而在多个工具之间缺乏一个统一管理 MCP, SKILLS 的方式。
 
 **CC Switch** 为你提供一个桌面应用来管理所有支持的 AI 工具。无需手动编辑配置文件，你将获得一个可视化界面，一键将供应商导入应用，一键在不同的供应商之间进行切换，内置 50+ 供应商预设、统一的 MCP, SKILLS 管理以及系统托盘即时切换功能——所有操作都基于可靠的 SQLite 数据库和原子写入机制，保护你的配置不被损坏。
 
-- **一个应用，八个工具** — 在单一界面中管理 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes
+- **一个应用，八个工具** — 在单一界面中管理 Claude Code、Claude Code（Cometix）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes
 - **告别手动编辑** — 50+ 供应商预设，包括 AWS Bedrock、NVIDIA NIM 和社区中转服务；一键即可切换
 - **统一 MCP, SKILLS 管理** — 一个面板管理 Claude、Codex、Gemini、Grok Build、OpenCode 和 Hermes 的 MCP, SKILLS, 支持双向同步
 - **系统托盘快速切换** — 从托盘菜单即时切换供应商，无需打开完整应用
@@ -222,7 +221,7 @@ TeamoRouter 还提供企业级功能，包括集中账单、团队管理、BYOK�
 
 ### 供应商管理
 
-- **8 个支持工具，50+ 预设** — Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes；复制 key 即可一键导入
+- **8 个支持工具，50+ 预设** — Claude Code、Claude Code（Cometix）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes；复制 key 即可一键导入
 - **通用供应商** — 一份配置同步到 Claude Code、Codex 和 Gemini CLI
 - 一键切换、系统托盘快速访问、拖拽排序、导入导出
 
@@ -249,7 +248,7 @@ TeamoRouter 还提供企业级功能，包括集中账单、团队管理、BYOK�
 ### 系统与平台
 
 - **云同步** — 自定义配置目录（Dropbox、OneDrive、iCloud、坚果云、NAS）及 WebDAV 服务器同步
-- **Deep Link** (`ccswitch://`) — 通过 URL 一键导入供应商、MCP 服务器、提示词和技能
+- **Deep Link** (`ccswitch-cometix://`) — 通过 URL 一键导入供应商、MCP 服务器、提示词和技能
 - 深色 / 浅色 / 跟随系统主题、开机自启、自动更新、原子写入、自动备份、国际化（简中/繁中/英/日）
 
 ## 常见问题
@@ -257,7 +256,7 @@ TeamoRouter 还提供企业级功能，包括集中账单、团队管理、BYOK�
 <details>
 <summary><strong>CC Switch 支持哪些 AI 工具？</strong></summary>
 
-CC Switch 支持八个工具：**Claude Code**、**Claude Desktop**、**Codex**、**Gemini CLI**、**Grok Build**、**OpenCode**、**OpenClaw** 和 **Hermes**。每个工具都有专属的供应商预设和配置管理。
+CC Switch Cometix 支持八个工具：**Claude Code**、**Claude Code（Cometix）**、**Codex**、**Gemini CLI**、**Grok Build**、**OpenCode**、**OpenClaw** 和 **Hermes**。每个工具都有专属的供应商预设和配置管理。
 
 </details>
 
@@ -301,11 +300,13 @@ CC Switch macOS 版本已通过 Apple 代码签名和公证，可直接下载安
 <details>
 <summary><strong>我的数据存储在哪里？</strong></summary>
 
-- **数据库**：`~/.cc-switch/cc-switch.db`（SQLite — 供应商、MCP、提示词、技能）
-- **本地设置**：`~/.cc-switch/settings.json`（设备级 UI 偏好设置）
-- **备份**：`~/.cc-switch/backups/`（自动轮换，保留最近 10 个）
-- **SKILLS**：`~/.cc-switch/skills/`（默认通过软链接连接到对应应用）
-- **技能备份**：`~/.cc-switch/skill-backups/`（卸载前自动创建，保留最近 20 个）
+Cometix 魔改版使用独立目录，不会读写原版 CC Switch 的 `~/.cc-switch/` 数据。
+
+- **数据库**：`~/.cc-switch-cometix/cc-switch.db`（SQLite — 供应商、MCP、提示词、技能）
+- **本地设置**：`~/.cc-switch-cometix/settings.json`（设备级 UI 偏好设置）
+- **备份**：`~/.cc-switch-cometix/backups/`（自动轮换，保留最近 10 个）
+- **SKILLS**：`~/.cc-switch-cometix/skills/`（默认通过软链接连接到对应应用）
+- **技能备份**：`~/.cc-switch-cometix/skill-backups/`（卸载前自动创建，保留最近 20 个）
 
 </details>
 
@@ -351,15 +352,15 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 CC Switch 在顶部应用切换器中新增“Claude Code（Cometix）”入口，并在“设置 → 关于 → 本地环境检查”中将
 [`@cometix/claude-code`](https://github.com/CometixSpace/claude-code) 作为独立工具项检测、安装和升级；
 原有的 Claude Code 入口和安装流程保持不变。两个入口的数据完全独立：官方 Claude Code 使用 `~/.claude`，
-Cometix 使用 `~/.claude-cometix`；供应商、当前供应商、MCP、Prompts 和 Skills 的启用状态均按应用分别保存，
-互不读取、复制或覆盖。从 Cometix 入口打开供应商终端时，CC Switch 会自动设置
-`CLAUDE_CONFIG_DIR=~/.claude-cometix`。
+Cometix 使用 `~/.hlclaude`；供应商、当前供应商、MCP、Prompts 和 Skills 的启用状态均按应用分别保存，
+互不读取或覆盖。CC Switch 检测和启动官方版本时使用 `claude`，检测和启动 Cometix 时使用 `hlclaude`。
 
-> **从外部终端启动**：如果不是通过 CC Switch 打开的终端，请先自行设置 `CLAUDE_CONFIG_DIR`，再运行 `claude`；
-> 否则 Claude Code 会按默认规则使用 `~/.claude`。PowerShell 示例：
-> `$env:CLAUDE_CONFIG_DIR="$HOME\.claude-cometix"; claude`。
+> **从外部终端启动**：直接运行 `hlclaude` 即可。该独立启动器会设置
+> `CLAUDE_CONFIG_DIR=~/.hlclaude`，不会读写官方 Claude Code 的 `~/.claude`。
 
-> **同名命令说明**：官方包与 Cometix 包都会注册 `claude`。如果两者安装到同一个 npm 全局目录，后安装的包会接管该命令；CC Switch 会根据实际启动脚本显示当前分发版本。若要同时保留两份安装，请使用不同的 Node 版本管理器或不同的全局安装目录。
+> **安装与升级**：最新版本号来自 Cometix GitHub Releases；实际安装和升级仍通过 npm 完成。CC Switch
+> 将包安装到独立的 `~/.local/share/hlclaude`，并使用 `~/.local/bin/hlclaude` 启动器，避免覆盖官方
+> `claude` 命令。
 
 ## 下载安装
 
@@ -371,43 +372,27 @@ Cometix 使用 `~/.claude-cometix`；供应商、当前供应商、MCP、Prompts
 
 ### Windows 用户
 
-从 [Releases](../../releases) 页面下载最新版本的 `CC-Switch-v{版本号}-Windows.msi` 安装包或 `CC-Switch-v{版本号}-Windows-Portable.zip` 绿色版。
+从 [GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest) 下载：
+
+- **x86_64**：`CC-Switch-Cometix-v{版本号}-Windows.msi` 或 `CC-Switch-Cometix-v{版本号}-Windows-Portable.zip`
+- **ARM64**：`CC-Switch-Cometix-v{版本号}-Windows-arm64.msi` 或 `CC-Switch-Cometix-v{版本号}-Windows-arm64-Portable.zip`
 
 ### macOS 用户
 
-**方式一：通过 Homebrew 安装（推荐）**
-
-```bash
-brew install --cask cc-switch
-```
-
-更新：
-
-```bash
-brew upgrade --cask cc-switch
-```
-
-**方式二：手动下载**
-
-从 [Releases](../../releases) 页面下载 `CC-Switch-v{版本号}-macOS.dmg`（推荐）或 `.zip`。
+此 fork 暂未提供 Homebrew cask。请从 [GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest) 下载通用 macOS 构建：`CC-Switch-Cometix-v{版本号}-macOS.dmg`（推荐）或 `CC-Switch-Cometix-v{版本号}-macOS.zip`。
 
 > **注意**：CC Switch macOS 版本已通过 Apple 代码签名和公证，可直接安装打开。
 
 ### Arch Linux 用户
 
-**通过 paru 安装（推荐）**
-
-```bash
-paru -S cc-switch-bin
-```
+此 fork 暂未提供 AUR 包。请从 [GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest) 使用 AppImage 或其他 Linux 安装包。
 
 ### Linux 用户
 
-从 [Releases](../../releases) 页面下载最新版本的 Linux 安装包：
+从 [GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest) 下载最新 Linux 构建：
 
-- `CC-Switch-v{版本号}-Linux.deb`（Debian/Ubuntu）
-- `CC-Switch-v{版本号}-Linux.rpm`（Fedora/RHEL/openSUSE）
-- `CC-Switch-v{版本号}-Linux.AppImage`（通用）
+- **x86_64**：`CC-Switch-Cometix-v{版本号}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
+- **ARM64**：`CC-Switch-Cometix-v{版本号}-Linux-arm64.AppImage` / `.deb` / `.rpm`
 
 > **Flatpak**：官方 Release 不包含 Flatpak 包。如需使用，可从 `.deb` 自行构建 — 参见 [`flatpak/README.md`](flatpak/README.md)。
 
@@ -436,7 +421,7 @@ paru -S cc-switch-bin
 
 **核心设计模式**
 
-- **SSOT**（单一事实源）：所有数据存储在 `~/.cc-switch/cc-switch.db`（SQLite）
+- **SSOT**（单一事实源）：所有数据存储在 `~/.cc-switch-cometix/cc-switch.db`（SQLite）
 - **双层存储**：SQLite 存储可同步数据，JSON 存储设备级设置
 - **双向同步**：切换时写入 live 文件，编辑当前供应商时从 live 回填
 - **原子写入**：临时文件 + 重命名模式防止配置损坏
@@ -602,7 +587,7 @@ pnpm test:unit --coverage
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=farion1231/cc-switch&type=Date)](https://www.star-history.com/#farion1231/cc-switch&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=nOBS1/cc-switch-s&type=Date)](https://www.star-history.com/#nOBS1/cc-switch-s&Date)
 
 ## License
 

@@ -396,6 +396,10 @@ pub fn handle_profile_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool
             log::error!("未知的项目分组托盘事件: {event_id}");
             return true;
         };
+        if crate::fork_policy::ensure_profile_scope_management_allowed(scope).is_err() {
+            log::warn!("已忽略禁用的 Claude Desktop 项目托盘事件: {event_id}");
+            return true;
+        }
         if let Some(app_state) = app.try_state::<AppState>() {
             if let Err(e) = app_state.db.set_current_profile_id(scope.as_str(), None) {
                 log::error!("清除当前项目失败: {e}");
@@ -421,6 +425,10 @@ pub fn handle_profile_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool
         log::error!("未知的项目分组托盘事件: {event_id}");
         return true;
     };
+    if crate::fork_policy::ensure_profile_scope_management_allowed(scope).is_err() {
+        log::warn!("已忽略禁用的 Claude Desktop 项目托盘事件: {event_id}");
+        return true;
+    }
 
     log::info!("应用项目: {profile_id}（{scope_str} 组）");
     let app_handle = app.clone();
@@ -474,6 +482,10 @@ pub fn handle_profile_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool
 pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool {
     for section in TRAY_SECTIONS.iter() {
         if let Some(suffix) = event_id.strip_prefix(section.prefix) {
+            if !crate::fork_policy::app_management_allowed(&section.app_type) {
+                log::warn!("已忽略禁用的 Claude Desktop 供应商托盘事件: {event_id}");
+                return true;
+            }
             // 处理 Auto 点击
             if suffix == AUTO_SUFFIX {
                 log::info!("切换到{} Auto模式", section.log_name);
@@ -679,7 +691,9 @@ pub fn create_tray_menu(
 
     // 每个应用类型折叠为子菜单，避免供应商过多时菜单过长
     for section in TRAY_SECTIONS.iter() {
-        if !visible_apps.is_visible(&section.app_type) {
+        if !crate::fork_policy::app_management_allowed(&section.app_type)
+            || !visible_apps.is_visible(&section.app_type)
+        {
             continue;
         }
 
@@ -765,10 +779,11 @@ pub fn create_tray_menu(
         use crate::services::profile::ProfileScope;
 
         let any_scope_visible = ProfileScope::ALL.iter().any(|scope| {
-            scope
-                .apps()
-                .iter()
-                .any(|app_type| visible_apps.is_visible(app_type))
+            crate::fork_policy::profile_scope_management_allowed(*scope)
+                && scope
+                    .apps()
+                    .iter()
+                    .any(|app_type| visible_apps.is_visible(app_type))
         });
         let profiles = if any_scope_visible {
             app_state.db.get_all_profiles()?
@@ -778,7 +793,8 @@ pub fn create_tray_menu(
 
         let mut scope_submenus = Vec::new();
         for scope in ProfileScope::ALL {
-            if profiles.is_empty()
+            if !crate::fork_policy::profile_scope_management_allowed(scope)
+                || profiles.is_empty()
                 || !scope
                     .apps()
                     .iter()
@@ -970,8 +986,11 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
             }
         }
         "open_website" => {
-            if let Err(e) = app.opener().open_url("https://ccswitch.io", None::<String>) {
-                log::error!("打开官方网站失败: {e}");
+            if let Err(e) = app
+                .opener()
+                .open_url("https://github.com/nOBS1/cc-switch-s", None::<String>)
+            {
+                log::error!("打开 Cometix 仓库失败: {e}");
             }
         }
         "lightweight_mode" => {
@@ -1062,7 +1081,9 @@ pub(crate) async fn refresh_all_usage_in_tray(app: &tauri::AppHandle) {
     let mut script_futures = Vec::new();
 
     for section in TRAY_SECTIONS.iter() {
-        if !visible_apps.is_visible(&section.app_type) {
+        if !crate::fork_policy::app_management_allowed(&section.app_type)
+            || !visible_apps.is_visible(&section.app_type)
+        {
             continue;
         }
 

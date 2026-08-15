@@ -79,6 +79,17 @@ fn test_parse_valid_claude_deeplink() {
 }
 
 #[test]
+fn test_parse_fork_specific_deeplink_scheme() {
+    let request = parse_deeplink_url(
+        "ccswitch-cometix://v1/import?resource=provider&app=claude-cometix&name=Relay",
+    )
+    .expect("fork-specific deep link should parse");
+
+    assert_eq!(request.app.as_deref(), Some("claude-cometix"));
+    assert_eq!(request.name.as_deref(), Some("Relay"));
+}
+
+#[test]
 fn test_parse_deeplink_with_notes() {
     let url = "ccswitch://v1/import?resource=provider&app=codex&name=Codex&homepage=https%3A%2F%2Fcodex.com&endpoint=https%3A%2F%2Fapi.codex.com&apiKey=key123&notes=Test%20notes";
 
@@ -908,6 +919,19 @@ fn test_parse_mcp_deeplink() {
     assert_eq!(request.apps.unwrap(), "claude,codex");
     assert_eq!(request.config.unwrap(), config_b64);
     assert!(request.enabled.unwrap());
+}
+
+#[test]
+fn test_parse_cometix_mcp_deeplink() {
+    let config = r#"{"mcpServers":{"test":{"command":"echo"}}}"#;
+    let config_b64 = BASE64_STANDARD.encode(config);
+    let url = format!(
+        "ccswitch-cometix://v1/import?resource=mcp&apps=claude-cometix&config={config_b64}&enabled=true"
+    );
+
+    let request = parse_deeplink_url(&url).expect("parse Cometix MCP deeplink");
+
+    assert_eq!(request.apps.as_deref(), Some("claude-cometix"));
 }
 
 #[test]

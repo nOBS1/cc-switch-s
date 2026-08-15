@@ -23,11 +23,13 @@ import { AppCountBar } from "@/components/common/AppCountBar";
 import { AppToggleGroup } from "@/components/common/AppToggleGroup";
 import { ListItemRow } from "@/components/common/ListItemRow";
 import { ManagementListSearch } from "@/components/common/ManagementListSearch";
+import { getMcpLiveId } from "@/utils/mcpStorageId";
 
 function getMcpSearchText(id: string, server: McpServer): string {
   const spec = server.server ?? {};
   const values: unknown[] = [
     id,
+    getMcpLiveId(id),
     server.id,
     server.name,
     server.description,
@@ -250,7 +252,7 @@ const UnifiedMcpPanel = React.forwardRef<
     setConfirmDialog({
       isOpen: true,
       title: t("mcp.unifiedPanel.deleteServer"),
-      message: t("mcp.unifiedPanel.deleteConfirm", { id }),
+      message: t("mcp.unifiedPanel.deleteConfirm", { id: getMcpLiveId(id) }),
       onConfirm: async () => {
         if (!beginWrite(true)) return;
         try {
@@ -387,10 +389,11 @@ const UnifiedMcpListItem: React.FC<UnifiedMcpListItemProps> = ({
   isLast,
 }) => {
   const { t } = useTranslation();
-  const name = server.name || id;
+  const liveId = getMcpLiveId(id);
+  const name = server.name || liveId;
   const description = server.description || "";
 
-  const meta = mcpPresets.find((p) => p.id === id);
+  const meta = mcpPresets.find((p) => p.id === liveId);
   const docsUrl = server.docs || meta?.docs;
   const homepageUrl = server.homepage || meta?.homepage;
   const tags = server.tags || meta?.tags;

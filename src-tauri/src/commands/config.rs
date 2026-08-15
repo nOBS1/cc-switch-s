@@ -7,6 +7,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::app_config::AppType;
 use crate::codex_config;
 use crate::config::{self, get_claude_settings_path, ConfigStatus};
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::settings;
 use crate::store::AppState;
 
@@ -171,7 +172,9 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
-    let config_dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
+    let config_dir = match app_type {
         AppType::Claude => config::get_claude_config_dir(),
         AppType::ClaudeCometix => config::get_claude_cometix_config_dir(),
         AppType::ClaudeDesktop => {
@@ -318,6 +321,9 @@ pub async fn set_common_config_snippet(
     snippet: String,
     state: tauri::State<'_, crate::store::AppState>,
 ) -> Result<(), String> {
+    if let Ok(app) = AppType::from_str(&app_type) {
+        ensure_app_management_allowed(&app).map_err(|e| e.to_string())?;
+    }
     let is_cleared = snippet.trim().is_empty();
     let old_snippet = state
         .db

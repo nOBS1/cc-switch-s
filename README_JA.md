@@ -1,18 +1,17 @@
 <div align="center">
 
-# CC Switch
+# CC Switch Cometix
 
-### Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes Agent のオールインワン管理ツール
+### Claude Code（公式版・Cometix）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes Agent のオールインワン管理ツール
 
-[![Version](https://img.shields.io/github/v/release/farion1231/cc-switch?color=blue&label=version)](https://github.com/farion1231/cc-switch/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/farion1231/cc-switch/releases)
+[![Version](https://img.shields.io/github/v/release/nOBS1/cc-switch-s?color=blue&label=version)](https://github.com/nOBS1/cc-switch-s/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/nOBS1/cc-switch-s/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
-[![Downloads](https://img.shields.io/github/downloads/farion1231/cc-switch/total)](https://github.com/farion1231/cc-switch/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/nOBS1/cc-switch-s/total)](https://github.com/nOBS1/cc-switch-s/releases/latest)
 
-<a href="https://trendshift.io/repositories/15372" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15372" alt="farion1231%2Fcc-switch | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-<a href="https://www.star-history.com/#farion1231/cc-switch&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=farion1231/cc-switch&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=farion1231/cc-switch" width="196" height="55" /></picture></a>
+<a href="https://www.star-history.com/#nOBS1/cc-switch-s&Date"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=nOBS1/cc-switch-s&theme=dark" /><img alt="Star History Rank" src="https://api.star-history.com/badge?repo=nOBS1/cc-switch-s" width="196" height="55" /></picture></a>
 
-### 🌐 唯一の公式サイト：**[ccswitch.io](https://ccswitch.io)**
+### 🌐 公式リポジトリ：**[nOBS1/cc-switch-s](https://github.com/nOBS1/cc-switch-s)**
 
 [English](README.md) | [中文](README_ZH.md) | 日本語 | [Deutsch](README_DE.md) | [Changelog](CHANGELOG.md)
 
@@ -20,7 +19,7 @@
 
 ## ❤️スポンサー
 
-> [ここに掲載しませんか？](mailto:farion1231@gmail.com)
+> [このフォークを支援しますか？](https://github.com/nOBS1/cc-switch-s/issues)
 
 <details open>
 <summary>クリックで折りたたむ</summary>
@@ -197,11 +196,11 @@ TeamoRouter は、集中請求、チーム管理、BYOK、スマートルーテ�
 
 ## CC Switch を選ぶ理由
 
-最新の AI コーディングは Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes などのツールに依存していますが、各ツールの設定形式はバラバラです。API プロバイダを切り替えるたびに JSON、TOML、`.env` ファイルを手動で編集する必要があり、複数ツール間で MCP や Skills を統一的に管理する手段もありません。
+最新の AI コーディングは Claude Code、Claude Code（Cometix）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes などのツールに依存していますが、各ツールの設定形式はバラバラです。API プロバイダを切り替えるたびに JSON、TOML、`.env` ファイルを手動で編集する必要があり、複数ツール間で MCP や Skills を統一的に管理する手段もありません。
 
 **CC Switch** は、対応する AI ツールを 1 つのデスクトップアプリで一元管理できます。設定ファイルを手作業で編集する代わりに、ワンクリックでプロバイダをインポートし、瞬時に切り替えられるビジュアルインターフェースを提供します。50 以上の組み込みプリセット、統一 MCP・Skills 管理、システムトレイからの即時切り替え機能を搭載。すべてはアトミック書き込みによる信頼性の高い SQLite データベースに支えられており、設定の破損を防ぎます。
 
-- **1 つのアプリで 8 つのツール** -- Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes を単一インターフェースで管理
+- **1 つのアプリで 8 つのツール** -- Claude Code、Claude Code（Cometix）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes を単一インターフェースで管理
 - **手動編集は不要** -- AWS Bedrock、NVIDIA NIM、コミュニティリレーなど 50 以上のプロバイダプリセットを内蔵。選んで切り替えるだけ
 - **統一 MCP・Skills 管理** -- 1 つのパネルで Claude、Codex、Gemini、Grok Build、OpenCode、Hermes の MCP サーバーと Skills を双方向同期で管理
 - **システムトレイでクイック切り替え** -- トレイメニューから即座にプロバイダを切り替え。アプリを開く必要なし
@@ -221,7 +220,7 @@ TeamoRouter は、集中請求、チーム管理、BYOK、スマートルーテ�
 
 ### プロバイダ管理
 
-- **8 つの対応ツール、50 以上のプリセット** -- Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes。キーをコピーしてワンクリックでインポート
+- **8 つの対応ツール、50 以上のプリセット** -- Claude Code、Claude Code（Cometix）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes。キーをコピーしてワンクリックでインポート
 - **ユニバーサルプロバイダ** -- 1 つの設定を Claude Code、Codex、Gemini CLI に同期
 - ワンクリック切り替え、システムトレイクイックアクセス、ドラッグ＆ドロップ並び替え、インポート/エクスポート
 
@@ -248,7 +247,7 @@ TeamoRouter は、集中請求、チーム管理、BYOK、スマートルーテ�
 ### システム & プラットフォーム
 
 - **クラウド同期** -- カスタム設定ディレクトリ（Dropbox、OneDrive、iCloud、NAS）および WebDAV サーバー同期
-- **Deep Link** (`ccswitch://`) -- URL 経由でプロバイダ、MCP サーバー、Prompts、Skills をワンクリックインポート
+- **Deep Link** (`ccswitch-cometix://`) -- URL 経由でプロバイダ、MCP サーバー、Prompts、Skills をワンクリックインポート
 - ダーク / ライト / システムテーマ、自動起動、自動アップデーター、アトミック書き込み、自動バックアップ、多言語対応（簡体中文/繁體中文/英/日）
 
 ## よくある質問
@@ -256,7 +255,7 @@ TeamoRouter は、集中請求、チーム管理、BYOK、スマートルーテ�
 <details>
 <summary><strong>CC Switch はどの AI ツールに対応していますか？</strong></summary>
 
-CC Switch は **Claude Code**、**Claude Desktop**、**Codex**、**Gemini CLI**、**Grok Build**、**OpenCode**、**OpenClaw**、**Hermes** の 8 つのツールに対応しています。各ツールに専用のプロバイダプリセットと設定管理が用意されています。
+CC Switch Cometix は **Claude Code**、**Claude Code（Cometix）**、**Codex**、**Gemini CLI**、**Grok Build**、**OpenCode**、**OpenClaw**、**Hermes** の 8 つのツールに対応しています。各ツールに専用のプロバイダプリセットと設定管理が用意されています。
 
 </details>
 
@@ -353,43 +352,27 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 ### Windows ユーザー
 
-[Releases](../../releases) ページから最新版の `CC-Switch-v{version}-Windows.msi` インストーラー、またはポータブル版 `CC-Switch-v{version}-Windows-Portable.zip` をダウンロード。
+[GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest) からダウンロード：
+
+- **x86_64**：`CC-Switch-Cometix-v{version}-Windows.msi` または `CC-Switch-Cometix-v{version}-Windows-Portable.zip`
+- **ARM64**：`CC-Switch-Cometix-v{version}-Windows-arm64.msi` または `CC-Switch-Cometix-v{version}-Windows-arm64-Portable.zip`
 
 ### macOS ユーザー
 
-**方法 1: Homebrew でインストール（推奨）**
+この fork では Homebrew cask をまだ提供していません。[GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest) から Universal macOS ビルドの `CC-Switch-Cometix-v{version}-macOS.dmg`（推奨）または `CC-Switch-Cometix-v{version}-macOS.zip` をダウンロードしてください。
 
-```bash
-brew install --cask cc-switch
-```
-
-アップデート:
-
-```bash
-brew upgrade --cask cc-switch
-```
-
-**方法 2: 手動ダウンロード**
-
-[Releases](../../releases) から `CC-Switch-v{version}-macOS.zip` をダウンロードして展開。
-
-> **注意**: 開発者アカウント未登録のため、初回起動時に「開発元を確認できません」と表示される場合があります。一度閉じてから「システム設定」→「プライバシーとセキュリティ」→「このまま開く」をクリックしてください。以降は通常通り起動できます。
+> **注意**: macOS リリースはコード署名および Apple の公証済みです。
 
 ### Arch Linux ユーザー
 
-**paru でインストール（推奨）**
-
-```bash
-paru -S cc-switch-bin
-```
+この fork では AUR パッケージをまだ提供していません。[GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest) の AppImage または別の Linux パッケージを使用してください。
 
 ### Linux ユーザー
 
-[Releases](../../releases) から最新版の Linux ビルドをダウンロード：
+[GitHub Releases](https://github.com/nOBS1/cc-switch-s/releases/latest) から最新版をダウンロード：
 
-- `CC-Switch-v{version}-Linux.deb`（Debian/Ubuntu）
-- `CC-Switch-v{version}-Linux.rpm`（Fedora/RHEL/openSUSE）
-- `CC-Switch-v{version}-Linux.AppImage`（汎用）
+- **x86_64**：`CC-Switch-Cometix-v{version}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
+- **ARM64**：`CC-Switch-Cometix-v{version}-Linux-arm64.AppImage` / `.deb` / `.rpm`
 
 > **Flatpak**：公式リリースには含まれていません。`.deb` から自分でビルドできます — 手順は [`flatpak/README.md`](flatpak/README.md) を参照してください。
 
@@ -584,7 +567,7 @@ PR を送る前に以下をご確認ください：
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=farion1231/cc-switch&type=Date)](https://www.star-history.com/#farion1231/cc-switch&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=nOBS1/cc-switch-s&type=Date)](https://www.star-history.com/#nOBS1/cc-switch-s&Date)
 
 ## ライセンス
 

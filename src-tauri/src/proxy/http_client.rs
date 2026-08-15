@@ -10,6 +10,8 @@ use std::net::IpAddr;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use super::types::DEFAULT_PROXY_PORT;
+
 /// 全局 HTTP 客户端实例
 static GLOBAL_CLIENT: OnceCell<RwLock<Client>> = OnceCell::new();
 
@@ -40,7 +42,7 @@ fn get_proxy_port() -> u16 {
         .get()
         .and_then(|lock| lock.read().ok())
         .map(|port| *port)
-        .unwrap_or(15721) // 默认端口作为回退
+        .unwrap_or(DEFAULT_PROXY_PORT)
 }
 
 /// 初始化全局 HTTP 客户端
@@ -394,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_proxy_points_to_loopback() {
-        // 设置 CC Switch 代理端口为 15721（默认值）
+        // 显式设置一个非默认端口，验证检测逻辑读取运行时配置。
         set_proxy_port(15721);
 
         // 只有指向 CC Switch 自己端口的 loopback 地址才返回 true

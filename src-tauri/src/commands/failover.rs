@@ -3,10 +3,16 @@
 //! 管理代理模式下的故障转移队列（基于 providers 表的 in_failover_queue 字段）
 
 use crate::database::FailoverQueueItem;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::provider::Provider;
 use crate::store::AppState;
 use std::str::FromStr;
 use tauri::Emitter;
+
+fn ensure_failover_management_allowed(app_type: &str) -> Result<(), String> {
+    let app = crate::app_config::AppType::from_str(app_type).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app).map_err(|e| e.to_string())
+}
 
 /// 获取故障转移队列
 #[tauri::command]
@@ -39,6 +45,7 @@ pub async fn add_to_failover_queue(
     app_type: String,
     provider_id: String,
 ) -> Result<(), String> {
+    ensure_failover_management_allowed(&app_type)?;
     state
         .db
         .add_to_failover_queue(&app_type, &provider_id)
@@ -52,6 +59,7 @@ pub async fn remove_from_failover_queue(
     app_type: String,
     provider_id: String,
 ) -> Result<(), String> {
+    ensure_failover_management_allowed(&app_type)?;
     state
         .db
         .remove_from_failover_queue(&app_type, &provider_id)
@@ -82,6 +90,7 @@ pub async fn set_auto_failover_enabled(
     app_type: String,
     enabled: bool,
 ) -> Result<(), String> {
+    ensure_failover_management_allowed(&app_type)?;
     log::info!(
         "[Failover] Setting auto_failover_enabled: app_type='{app_type}', enabled={enabled}"
     );
