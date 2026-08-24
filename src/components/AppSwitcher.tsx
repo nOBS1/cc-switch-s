@@ -11,6 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import { isManagementApp } from "@/utils/forkPolicy";
 import { GitFork, MoreHorizontal, Terminal } from "lucide-react";
+import { APP_IDS } from "@/config/appConfig";
 
 const APP_BADGE_ICON: Partial<
   Record<AppId, { icon: typeof Terminal; offsetY?: number }>
@@ -25,16 +26,6 @@ interface AppSwitcherProps {
   visibleApps?: VisibleApps;
 }
 
-const ALL_APPS: AppId[] = [
-  "claude",
-  "claude-cometix",
-  "codex",
-  "gemini",
-  "grokbuild",
-  "opencode",
-  "openclaw",
-  "hermes",
-];
 const STORAGE_KEY = "cc-switch-last-app";
 
 const APP_ICON_NAME: Record<AppId, string> = {
@@ -47,6 +38,7 @@ const APP_ICON_NAME: Record<AppId, string> = {
   opencode: "opencode",
   openclaw: "openclaw",
   hermes: "hermes",
+  pi: "pi",
 };
 
 const APP_NAME_KEY: Record<AppId, string> = {
@@ -59,6 +51,7 @@ const APP_NAME_KEY: Record<AppId, string> = {
   opencode: "apps.opencode",
   openclaw: "apps.openclaw",
   hermes: "apps.hermes",
+  pi: "apps.pi",
 };
 
 /** 应用图标 + 角标（Claude 系列入口用角标区分客户端） */
@@ -117,7 +110,7 @@ export function AppSwitcher({
   };
 
   // Filter apps based on visibility settings (default all visible)
-  const appsToShow = ALL_APPS.filter((app) => {
+  const appsToShow = APP_IDS.filter((app) => {
     if (!isManagementApp(app)) return false;
     if (!visibleApps) return true;
     return visibleApps[app];

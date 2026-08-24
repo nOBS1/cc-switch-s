@@ -38,7 +38,8 @@ pub struct VisibleApps {
         rename = "claude-desktop",
         alias = "claudeDesktop",
         alias = "claude_desktop",
-        default = "default_true"
+        default,
+        skip_deserializing
     )]
     pub claude_desktop: bool,
     #[serde(default = "default_true")]
@@ -53,6 +54,8 @@ pub struct VisibleApps {
     pub openclaw: bool,
     #[serde(default)]
     pub hermes: bool,
+    #[serde(default = "default_true")]
+    pub pi: bool,
 }
 
 impl Default for VisibleApps {
@@ -60,13 +63,14 @@ impl Default for VisibleApps {
         Self {
             claude: true,
             claude_cometix: true,
-            claude_desktop: true,
+            claude_desktop: false,
             codex: true,
             gemini: true,
             grokbuild: true,
             opencode: true,
             openclaw: true,
             hermes: false, // 默认不显示，需用户手动启用
+            pi: true,
         }
     }
 }
@@ -77,13 +81,14 @@ impl VisibleApps {
         match app {
             AppType::Claude => self.claude,
             AppType::ClaudeCometix => self.claude_cometix,
-            AppType::ClaudeDesktop => self.claude_desktop,
+            AppType::ClaudeDesktop => false,
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::GrokBuild => self.grokbuild,
             AppType::OpenCode => self.opencode,
             AppType::OpenClaw => self.openclaw,
             AppType::Hermes => self.hermes,
+            AppType::Pi => self.pi,
         }
     }
 }
@@ -448,6 +453,8 @@ pub struct AppSettings {
     pub openclaw_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hermes_config_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_config_dir: Option<String>,
 
     // ===== 当前供应商 ID（设备级）=====
     /// 当前 Claude 供应商 ID（本地存储，优先于数据库 is_current）
@@ -563,6 +570,7 @@ impl Default for AppSettings {
             opencode_config_dir: None,
             openclaw_config_dir: None,
             hermes_config_dir: None,
+            pi_config_dir: None,
             current_provider_claude: None,
             current_provider_claude_cometix: None,
             current_provider_claude_desktop: None,
@@ -651,6 +659,13 @@ impl AppSettings {
 
         self.hermes_config_dir = self
             .hermes_config_dir
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        self.pi_config_dir = self
+            .pi_config_dir
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -805,19 +820,20 @@ fn settings_store() -> &'static RwLock<AppSettings> {
     SETTINGS_STORE.get_or_init(|| RwLock::new(AppSettings::load_from_file()))
 }
 
-fn resolve_override_path(raw: &str) -> PathBuf {
+pub(crate) fn resolve_override_path(raw: &str) -> PathBuf {
+    let join_home = |home: PathBuf, suffix: &str| {
+        suffix
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .fold(home, |path, component| path.join(component))
+    };
+
     if raw == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home;
-        }
+        return crate::config::get_home_dir();
     } else if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
+        return join_home(crate::config::get_home_dir(), stripped);
     } else if let Some(stripped) = raw.strip_prefix("~\\") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
+        return join_home(crate::config::get_home_dir(), stripped);
     }
 
     PathBuf::from(raw)
@@ -1064,6 +1080,14 @@ pub fn get_hermes_override_dir() -> Option<PathBuf> {
         .map(|p| resolve_override_path(p))
 }
 
+pub fn get_pi_override_dir() -> Option<PathBuf> {
+    let settings = settings_store().read().ok()?;
+    settings
+        .pi_config_dir
+        .as_ref()
+        .map(|path| resolve_override_path(path))
+}
+
 pub fn preserve_codex_official_auth_on_switch() -> bool {
     settings_store()
         .read()
@@ -1102,6 +1126,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
         AppType::OpenCode => settings.current_provider_opencode.clone(),
         AppType::OpenClaw => settings.current_provider_openclaw.clone(),
         AppType::Hermes => settings.current_provider_hermes.clone(),
+        AppType::Pi => None,
     }
 }
 
@@ -1121,6 +1146,7 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
         AppType::OpenCode => settings.current_provider_opencode = id_owned.clone(),
         AppType::OpenClaw => settings.current_provider_openclaw = id_owned.clone(),
         AppType::Hermes => settings.current_provider_hermes = id_owned.clone(),
+        AppType::Pi => {}
     })
 }
 
@@ -1430,26 +1456,9 @@ mod tests {
     }
 
     #[test]
-    fn visible_apps_old_settings_default_claude_desktop_visible() {
+    fn visible_apps_old_settings_default_cometix_visible_and_desktop_hidden() {
         let visible: VisibleApps = serde_json::from_value(serde_json::json!({
             "claude": true,
-            "codex": true,
-            "gemini": true,
-            "opencode": true,
-            "openclaw": true,
-            "hermes": true
-        }))
-        .expect("visible apps");
-
-        assert!(visible.is_visible(&AppType::ClaudeDesktop));
-        assert!(visible.claude_cometix);
-    }
-
-    #[test]
-    fn visible_apps_accepts_claude_desktop_aliases() {
-        let visible: VisibleApps = serde_json::from_value(serde_json::json!({
-            "claude": true,
-            "claudeDesktop": false,
             "codex": true,
             "gemini": true,
             "opencode": true,
@@ -1459,6 +1468,24 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+        assert!(visible.claude_cometix);
+    }
+
+    #[test]
+    fn visible_apps_ignores_legacy_claude_desktop_enablement() {
+        let visible: VisibleApps = serde_json::from_value(serde_json::json!({
+            "claude": true,
+            "claudeDesktop": true,
+            "codex": true,
+            "gemini": true,
+            "opencode": true,
+            "openclaw": true,
+            "hermes": true
+        }))
+        .expect("visible apps");
+
+        assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+        assert!(!visible.claude_desktop);
     }
 
     #[test]
@@ -1470,5 +1497,14 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.claude_cometix);
+    }
+
+    #[test]
+    fn override_paths_expand_windows_style_tilde_separators() {
+        let home = crate::config::get_home_dir();
+        assert_eq!(
+            resolve_override_path(r"~\pi\agent"),
+            home.join("pi").join("agent")
+        );
     }
 }

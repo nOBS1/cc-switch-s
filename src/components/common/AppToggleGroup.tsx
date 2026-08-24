@@ -6,7 +6,6 @@ import {
 } from "@/components/ui/tooltip";
 import type { AppId } from "@/lib/api/types";
 import { APP_IDS, APP_ICON_MAP } from "@/config/appConfig";
-import { useTranslation } from "react-i18next";
 
 interface AppToggleGroupProps {
   apps: Partial<Record<AppId, boolean>>;
@@ -21,13 +20,10 @@ export const AppToggleGroup: React.FC<AppToggleGroupProps> = ({
   appIds = APP_IDS,
   disabled = false,
 }) => {
-  const { t } = useTranslation();
-
   return (
     <div className="flex items-center gap-1.5 flex-shrink-0">
       {appIds.map((app) => {
-        const { labelKey, icon, activeClass } = APP_ICON_MAP[app];
-        const label = t(labelKey);
+        const { label, icon, activeClass } = APP_ICON_MAP[app];
         const enabled = apps[app];
         return (
           <Tooltip key={app}>

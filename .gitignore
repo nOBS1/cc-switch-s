@@ -14,6 +14,8 @@ GEMINI.md
 /.codex
 /.gemini
 /.cc-switch
+/.cc-switch-cometix
+/src-tauri/.cc-switch-cometix
 /.idea
 /.vscode
 vitest-report.json

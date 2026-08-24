@@ -40,7 +40,6 @@ export const AppCountBar: React.FC<AppCountBarProps> = ({
       <div className="min-w-0 flex-1 overflow-x-auto no-scrollbar">
         <div className="ml-auto flex w-max min-w-full items-center justify-end gap-2">
           {appIds.map((app) => {
-            const appLabel = t(APP_ICON_MAP[app].labelKey);
             const count = counts[app] ?? 0;
             const allEnabled =
               bulkToggleEnabled &&
@@ -50,8 +49,8 @@ export const AppCountBar: React.FC<AppCountBarProps> = ({
               bulkToggleEnabled && count > 0 && count < bulkTotalCount;
             const pending = pendingApp === app;
             const actionLabel = allEnabled
-              ? t("common.disableAllForApp", { app: appLabel })
-              : t("common.enableAllForApp", { app: appLabel });
+              ? t("common.disableAllForApp", { app: APP_ICON_MAP[app].label })
+              : t("common.enableAllForApp", { app: APP_ICON_MAP[app].label });
 
             if (!bulkToggleEnabled) {
               return (
@@ -60,7 +59,7 @@ export const AppCountBar: React.FC<AppCountBarProps> = ({
                   variant="secondary"
                   className={APP_ICON_MAP[app].badgeClass}
                 >
-                  <span className="opacity-75">{appLabel}:</span>
+                  <span className="opacity-75">{APP_ICON_MAP[app].label}:</span>
                   <span className="font-bold ml-1">{count}</span>
                 </Badge>
               );
@@ -95,7 +94,7 @@ export const AppCountBar: React.FC<AppCountBarProps> = ({
                   pending && "cursor-wait disabled:cursor-wait",
                 )}
               >
-                <span className="opacity-75">{appLabel}:</span>
+                <span className="opacity-75">{APP_ICON_MAP[app].label}:</span>
                 <span className="ml-1 font-bold">{count}</span>
               </button>
             );

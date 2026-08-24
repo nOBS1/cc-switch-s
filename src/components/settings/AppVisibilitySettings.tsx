@@ -8,6 +8,7 @@ import type { SettingsFormState } from "@/hooks/useSettings";
 import type { VisibleApps } from "@/types";
 import type { AppId } from "@/lib/api/types";
 import { isManagementApp } from "@/utils/forkPolicy";
+import { DEFAULT_VISIBLE_APPS } from "@/config/appConfig";
 
 interface AppVisibilitySettingsProps {
   settings: SettingsFormState;
@@ -31,6 +32,7 @@ const APP_CONFIG: Array<{
   { id: "opencode", icon: "opencode", nameKey: "apps.opencode" },
   { id: "openclaw", icon: "openclaw", nameKey: "apps.openclaw" },
   { id: "hermes", icon: "hermes", nameKey: "apps.hermes" },
+  { id: "pi", icon: "pi", nameKey: "apps.pi" },
 ];
 
 export function AppVisibilitySettings({
@@ -40,14 +42,8 @@ export function AppVisibilitySettings({
   const { t } = useTranslation();
 
   const visibleApps: VisibleApps = {
-    claude: true,
+    ...DEFAULT_VISIBLE_APPS,
     "claude-cometix": true,
-    codex: true,
-    gemini: true,
-    grokbuild: true,
-    opencode: true,
-    openclaw: true,
-    hermes: true,
     ...settings.visibleApps,
     "claude-desktop": false,
   };

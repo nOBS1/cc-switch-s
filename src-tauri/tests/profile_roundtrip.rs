@@ -198,9 +198,8 @@ fn profile_snapshot_apply_roundtrip_restores_configuration() {
 
     // ---- 改动全部四类配置（走真实切换路径）----
     ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
-    // Desktop 现在有自己的项目分组；Claude 分组 apply 不应再影响 Desktop
-    #[cfg(any(target_os = "macos", windows))]
-    ProviderService::switch(&state, AppType::ClaudeDesktop, "d2").expect("switch desktop to d2");
+    // 此 fork 禁止管理 Claude Desktop；保留 d1 作为只读兼容数据，验证
+    // Claude 分组 apply 不会触碰它。
     McpService::toggle_app(&state, "m1", AppType::Claude, false).expect("disable m1");
     McpService::toggle_app(&state, "m2", AppType::Claude, true).expect("enable m2");
     SkillService::toggle_app(&state.db, "local:test-skill", &AppType::Claude, false)
@@ -218,20 +217,14 @@ fn profile_snapshot_apply_roundtrip_restores_configuration() {
         .expect("get current provider");
     assert_eq!(current.as_deref(), Some("p1"), "provider restored to p1");
 
-    // Claude 分组不再管理 Desktop：apply 后 Desktop 保持切换前的状态不变。
-    // macOS/Windows 上上面已切到 d2；Linux（CI）不支持 Desktop 切换、那行被 cfg 门控
-    // 编译剔除，Desktop 仍是种子值 d1。两种情况都验证 claude-scope apply 不会动 Desktop。
+    // Claude 分组不管理 Desktop：apply 后只读兼容数据保持不变。
     let current_desktop = state
         .db
         .get_current_provider(AppType::ClaudeDesktop.as_str())
         .expect("get current desktop provider");
-    #[cfg(any(target_os = "macos", windows))]
-    let expected_desktop = "d2";
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let expected_desktop = "d1";
     assert_eq!(
         current_desktop.as_deref(),
-        Some(expected_desktop),
+        Some("d1"),
         "desktop provider untouched by claude-scope apply"
     );
 
@@ -750,6 +743,7 @@ fn profile_switch_auto_disables_takeover_before_apply() {
 
 #[cfg(any(target_os = "macos", windows))]
 #[test]
+#[ignore = "Claude Desktop management is disabled in the Cometix fork"]
 fn claude_desktop_profile_scope_is_independent() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();

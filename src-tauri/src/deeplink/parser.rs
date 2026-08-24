@@ -92,7 +92,7 @@ fn parse_provider_deeplink(
             | "hermes"
     ) {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'claude-cometix', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', or 'hermes', got '{app}'"
+            "Invalid provider app type: '{app}'"
         )));
     }
 
@@ -206,9 +206,10 @@ fn parse_prompt_deeplink(
             | "opencode"
             | "openclaw"
             | "hermes"
+            | "pi"
     ) {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'claude-cometix', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', or 'hermes', got '{app}'"
+            "Invalid app type: must be 'claude', 'claude-cometix', 'codex', 'gemini', 'grokbuild', 'opencode', 'openclaw', 'hermes', or 'pi', got '{app}'"
         )));
     }
 
