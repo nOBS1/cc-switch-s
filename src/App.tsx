@@ -109,6 +109,7 @@ import {
   APP_IDS,
   DEFAULT_VISIBLE_APPS,
   isProxyAppId,
+  isSessionAppId,
 } from "@/config/appConfig";
 import { isManagementApp } from "@/utils/forkPolicy";
 
@@ -237,17 +238,7 @@ function App() {
       setCurrentView("providers");
       return;
     }
-    if (
-      currentView === "sessions" &&
-      sharedFeatureApp !== "claude" &&
-      sharedFeatureApp !== "codex" &&
-      sharedFeatureApp !== "grokbuild" &&
-      sharedFeatureApp !== "opencode" &&
-      sharedFeatureApp !== "openclaw" &&
-      sharedFeatureApp !== "gemini" &&
-      sharedFeatureApp !== "hermes" &&
-      sharedFeatureApp !== "pi"
-    ) {
+    if (currentView === "sessions" && !isSessionAppId(sharedFeatureApp)) {
       setCurrentView("providers");
     }
   }, [sharedFeatureApp, currentView]);
@@ -314,15 +305,7 @@ function App() {
   const { data: openclawHealthWarnings = [] } =
     useOpenClawHealth(isOpenClawView);
   const hasSkillsSupport = sharedFeatureApp !== "openclaw";
-  const hasSessionSupport =
-    sharedFeatureApp === "claude" ||
-    sharedFeatureApp === "codex" ||
-    sharedFeatureApp === "grokbuild" ||
-    sharedFeatureApp === "opencode" ||
-    sharedFeatureApp === "openclaw" ||
-    sharedFeatureApp === "gemini" ||
-    sharedFeatureApp === "hermes" ||
-    sharedFeatureApp === "pi";
+  const hasSessionSupport = isSessionAppId(sharedFeatureApp);
   const hasMcpSupport = sharedFeatureApp !== "pi";
 
   const {

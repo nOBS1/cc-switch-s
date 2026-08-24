@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::config::get_claude_config_dir;
+use crate::config::{get_claude_cometix_config_dir, get_claude_config_dir};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
 use super::utils::{
@@ -13,15 +14,25 @@ use super::utils::{
 };
 
 const PROVIDER_ID: &str = "claude";
+const COMETIX_PROVIDER_ID: &str = "claude-cometix";
 
 pub fn scan_sessions() -> Vec<SessionMeta> {
     let root = get_claude_config_dir().join("projects");
+    scan_sessions_in(&root, PROVIDER_ID, "claude")
+}
+
+pub fn scan_cometix_sessions() -> Vec<SessionMeta> {
+    let root = get_claude_cometix_config_dir().join("projects");
+    scan_sessions_in(&root, COMETIX_PROVIDER_ID, "hlclaude")
+}
+
+fn scan_sessions_in(root: &Path, provider_id: &str, cli_command: &str) -> Vec<SessionMeta> {
     let mut files = Vec::new();
-    collect_jsonl_files(&root, &mut files);
+    collect_jsonl_files(root, &mut files);
 
     let mut sessions = Vec::new();
     for path in files {
-        if let Some(meta) = parse_session(&path) {
+        if let Some(meta) = parse_session_for(&path, provider_id, cli_command) {
             sessions.push(meta);
         }
     }
@@ -121,6 +132,10 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
 }
 
 fn parse_session(path: &Path) -> Option<SessionMeta> {
+    parse_session_for(path, PROVIDER_ID, "claude")
+}
+
+fn parse_session_for(path: &Path, provider_id: &str, cli_command: &str) -> Option<SessionMeta> {
     if is_agent_session(path) {
         return None;
     }
@@ -239,8 +254,10 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
 
+    let escaped_session_id = crate::session_manager::terminal::shell_escape(&session_id);
+
     Some(SessionMeta {
-        provider_id: PROVIDER_ID.to_string(),
+        provider_id: provider_id.to_string(),
         session_id: session_id.clone(),
         title,
         summary,
@@ -248,7 +265,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         created_at,
         last_active_at,
         source_path: Some(path.to_string_lossy().to_string()),
-        resume_command: Some(format!("claude --resume {session_id}")),
+        resume_command: Some(format!("{cli_command} --resume {escaped_session_id}")),
     })
 }
 
@@ -270,17 +287,54 @@ fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
         return;
     }
 
-    let entries = match std::fs::read_dir(root) {
+    let canonical_root = match root.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    let mut visited = HashSet::new();
+    collect_jsonl_files_within(root, &canonical_root, &mut visited, files);
+}
+
+fn collect_jsonl_files_within(
+    directory: &Path,
+    canonical_root: &Path,
+    visited: &mut HashSet<PathBuf>,
+    files: &mut Vec<PathBuf>,
+) {
+    let canonical_directory = match directory.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    if !canonical_directory.starts_with(canonical_root) || !visited.insert(canonical_directory) {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(_) => return,
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            collect_jsonl_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            files.push(path);
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_jsonl_files_within(&path, canonical_root, visited, files);
+        } else if file_type.is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        {
+            let is_contained = path
+                .canonicalize()
+                .map(|canonical_path| canonical_path.starts_with(canonical_root))
+                .unwrap_or(false);
+            if is_contained {
+                files.push(path);
+            }
         }
     }
 }
@@ -496,5 +550,87 @@ mod tests {
 
         let meta = parse_session(&path).unwrap();
         assert_eq!(meta.title.as_deref(), Some("帮我看看工作区的改动"));
+    }
+
+    #[test]
+    fn cometix_scan_uses_independent_provider_id_and_resume_command() {
+        let temp = tempdir().expect("tempdir");
+        let projects = temp.path().join("projects");
+        std::fs::create_dir_all(&projects).expect("create projects");
+        let path = projects.join("cometix-session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"sessionId\":\"cometix-session\",\"cwd\":\"/tmp/cometix-project\",\"timestamp\":\"2026-03-06T10:00:00Z\"}\n",
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Cometix history\"},\"timestamp\":\"2026-03-06T10:01:00Z\"}\n"
+            ),
+        )
+        .expect("write Cometix session");
+
+        let sessions = scan_sessions_in(&projects, COMETIX_PROVIDER_ID, "hlclaude");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].provider_id, COMETIX_PROVIDER_ID);
+        assert_eq!(
+            sessions[0].resume_command.as_deref(),
+            Some("hlclaude --resume 'cometix-session'")
+        );
+    }
+
+    #[test]
+    fn resume_command_shell_escapes_session_id() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("unsafe-session.jsonl");
+        std::fs::write(
+            &path,
+            "{\"sessionId\":\"$(touch /tmp/pwned)\",\"timestamp\":\"2026-03-06T10:00:00Z\"}\n",
+        )
+        .expect("write session");
+
+        let meta = parse_session_for(&path, COMETIX_PROVIDER_ID, "hlclaude")
+            .expect("parse Cometix session");
+
+        assert_eq!(
+            meta.resume_command.as_deref(),
+            Some("hlclaude --resume '$(touch /tmp/pwned)'")
+        );
+    }
+
+    #[test]
+    fn scan_helper_rejects_a_directory_outside_the_canonical_root() {
+        let root = tempdir().expect("root");
+        let outside = tempdir().expect("outside");
+        std::fs::write(outside.path().join("outside.jsonl"), "{}\n")
+            .expect("write outside session");
+
+        let canonical_root = root.path().canonicalize().expect("canonical root");
+        let mut visited = std::collections::HashSet::new();
+        let mut files = Vec::new();
+        collect_jsonl_files_within(outside.path(), &canonical_root, &mut visited, &mut files);
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn scan_does_not_follow_a_directory_link_outside_the_root() {
+        let root = tempdir().expect("root");
+        let outside = tempdir().expect("outside");
+        std::fs::write(outside.path().join("outside.jsonl"), "{}\n")
+            .expect("write outside session");
+        let link = root.path().join("linked-outside");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).expect("create directory symlink");
+
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(outside.path(), &link).is_err() {
+            // Windows may require Developer Mode or SeCreateSymbolicLinkPrivilege.
+            return;
+        }
+
+        let mut files = Vec::new();
+        collect_jsonl_files(root.path(), &mut files);
+
+        assert!(files.is_empty());
     }
 }

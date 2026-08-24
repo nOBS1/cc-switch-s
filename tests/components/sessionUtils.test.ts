@@ -2,12 +2,24 @@ import { describe, expect, it } from "vitest";
 import {
   extractCodexPromptPreview,
   formatSessionMessagePreview,
+  getProviderIconName,
+  getProviderLabel,
   groupSessionsByProviderAndDirectory,
   shouldHideCodexMessageFromToc,
 } from "@/components/sessions/utils";
 import type { SessionMeta } from "@/types";
 
 describe("session utils", () => {
+  it("uses the Cometix label and Claude icon without merging provider ids", () => {
+    const t = (key: string) =>
+      key === "apps.claudeCometix" ? "Claude Code（Cometix）" : key;
+
+    expect(getProviderLabel("claude-cometix", t)).toBe(
+      "Claude Code（Cometix）",
+    );
+    expect(getProviderIconName("claude-cometix")).toBe("claude");
+  });
+
   it("extracts Codex VS Code prompts after the request marker", () => {
     const content = [
       "# Context from my IDE setup:",

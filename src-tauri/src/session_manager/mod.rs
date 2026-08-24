@@ -56,7 +56,7 @@ pub struct DeleteSessionOutcome {
 }
 
 pub fn scan_sessions() -> Vec<SessionMeta> {
-    let (r1, r2, r3, r4, r5, r6, r7, r8) = std::thread::scope(|s| {
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = std::thread::scope(|s| {
         let h1 = s.spawn(codex::scan_sessions);
         let h2 = s.spawn(claude::scan_sessions);
         let h3 = s.spawn(opencode::scan_sessions);
@@ -65,6 +65,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
         let h6 = s.spawn(hermes::scan_sessions);
         let h7 = s.spawn(grokbuild::scan_sessions);
         let h8 = s.spawn(pi::scan_sessions);
+        let h9 = s.spawn(claude::scan_cometix_sessions);
         (
             h1.join().unwrap_or_default(),
             h2.join().unwrap_or_default(),
@@ -74,6 +75,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
             h6.join().unwrap_or_default(),
             h7.join().unwrap_or_default(),
             h8.join().unwrap_or_default(),
+            h9.join().unwrap_or_default(),
         )
     });
 
@@ -86,6 +88,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     sessions.extend(r6);
     sessions.extend(r7);
     sessions.extend(r8);
+    sessions.extend(r9);
 
     sessions.sort_by(|a, b| {
         let a_ts = a.last_active_at.or(a.created_at).unwrap_or(0);
@@ -105,16 +108,26 @@ pub fn load_messages(provider_id: &str, source_path: &str) -> Result<Vec<Session
         return hermes::load_messages_sqlite(source_path);
     }
 
-    let path = Path::new(source_path);
+    let roots = provider_roots(provider_id)?;
+    load_messages_with_roots(provider_id, Path::new(source_path), &roots)
+}
+
+fn load_messages_with_roots(
+    provider_id: &str,
+    source_path: &Path,
+    roots: &[PathBuf],
+) -> Result<Vec<SessionMessage>, String> {
+    let (validated_source, _) = validate_source_path_with_roots(provider_id, source_path, roots)?;
+
     match provider_id {
-        "codex" => codex::load_messages(path),
-        "claude" => claude::load_messages(path),
-        "opencode" => opencode::load_messages(path),
-        "openclaw" => openclaw::load_messages(path),
-        "gemini" => gemini::load_messages(path),
-        "grokbuild" => grokbuild::load_messages(path),
-        "hermes" => hermes::load_messages(path),
-        "pi" => pi::load_messages(path),
+        "codex" => codex::load_messages(&validated_source),
+        "claude" | "claude-cometix" => claude::load_messages(&validated_source),
+        "opencode" => opencode::load_messages(&validated_source),
+        "openclaw" => openclaw::load_messages(&validated_source),
+        "gemini" => gemini::load_messages(&validated_source),
+        "grokbuild" => grokbuild::load_messages(&validated_source),
+        "hermes" => hermes::load_messages(&validated_source),
+        "pi" => pi::load_messages(&validated_source),
         _ => Err(format!("Unsupported provider: {provider_id}")),
     }
 }
@@ -152,6 +165,29 @@ fn delete_session_with_roots(
     source_path: &Path,
     roots: &[PathBuf],
 ) -> Result<bool, String> {
+    let (validated_source, validated_root) =
+        validate_source_path_with_roots(provider_id, source_path, roots)?;
+
+    match provider_id {
+        "codex" => codex::delete_session(&validated_root, &validated_source, session_id),
+        "claude" | "claude-cometix" => {
+            claude::delete_session(&validated_root, &validated_source, session_id)
+        }
+        "opencode" => opencode::delete_session(&validated_root, &validated_source, session_id),
+        "openclaw" => openclaw::delete_session(&validated_root, &validated_source, session_id),
+        "gemini" => gemini::delete_session(&validated_root, &validated_source, session_id),
+        "grokbuild" => grokbuild::delete_session(&validated_root, &validated_source, session_id),
+        "hermes" => hermes::delete_session(&validated_root, &validated_source, session_id),
+        "pi" => pi::delete_session(&validated_root, &validated_source, session_id),
+        _ => Err(format!("Unsupported provider: {provider_id}")),
+    }
+}
+
+fn validate_source_path_with_roots(
+    provider_id: &str,
+    source_path: &Path,
+    roots: &[PathBuf],
+) -> Result<(PathBuf, PathBuf), String> {
     let validated_source = canonicalize_existing_path(source_path, "session source")?;
 
     let mut saw_existing_root = false;
@@ -163,23 +199,7 @@ fn delete_session_with_roots(
         saw_existing_root = true;
         let validated_root = canonicalize_existing_path(root, "session root")?;
         if validated_source.starts_with(&validated_root) {
-            return match provider_id {
-                "codex" => codex::delete_session(&validated_root, &validated_source, session_id),
-                "claude" => claude::delete_session(&validated_root, &validated_source, session_id),
-                "opencode" => {
-                    opencode::delete_session(&validated_root, &validated_source, session_id)
-                }
-                "openclaw" => {
-                    openclaw::delete_session(&validated_root, &validated_source, session_id)
-                }
-                "gemini" => gemini::delete_session(&validated_root, &validated_source, session_id),
-                "grokbuild" => {
-                    grokbuild::delete_session(&validated_root, &validated_source, session_id)
-                }
-                "hermes" => hermes::delete_session(&validated_root, &validated_source, session_id),
-                "pi" => pi::delete_session(&validated_root, &validated_source, session_id),
-                _ => Err(format!("Unsupported provider: {provider_id}")),
-            };
+            return Ok((validated_source, validated_root));
         }
     }
 
@@ -203,6 +223,9 @@ fn provider_roots(provider_id: &str) -> Result<Vec<PathBuf>, String> {
     let roots = match provider_id {
         "codex" => codex::session_roots(),
         "claude" => vec![crate::config::get_claude_config_dir().join("projects")],
+        "claude-cometix" => {
+            vec![crate::config::get_claude_cometix_config_dir().join("projects")]
+        }
         "opencode" => vec![opencode::get_opencode_data_dir()],
         "openclaw" => vec![crate::openclaw_config::get_openclaw_dir().join("agents")],
         "gemini" => vec![crate::gemini_config::get_gemini_dir().join("tmp")],
@@ -321,6 +344,131 @@ mod tests {
                 .expect_err("expected missing source path to fail");
 
         assert!(err.contains("session source not found"));
+    }
+
+    #[test]
+    fn loads_cometix_session_messages_with_the_claude_parser() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("cometix-session.jsonl");
+        std::fs::write(
+            &source,
+            "{\"message\":{\"role\":\"user\",\"content\":\"hello from cometix\"},\"timestamp\":\"2026-03-06T10:00:00Z\"}\n",
+        )
+        .expect("write Cometix session");
+
+        let messages =
+            load_messages_with_roots("claude-cometix", &source, &[temp.path().to_path_buf()])
+                .expect("load Cometix session messages");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "hello from cometix");
+    }
+
+    #[test]
+    fn cometix_session_root_is_independent_from_official_claude() {
+        let official = provider_roots("claude").expect("official Claude roots");
+        let cometix = provider_roots("claude-cometix").expect("Cometix roots");
+
+        assert_eq!(
+            official,
+            vec![crate::config::get_claude_config_dir().join("projects")]
+        );
+        assert_eq!(
+            cometix,
+            vec![crate::config::get_claude_cometix_config_dir().join("projects")]
+        );
+        assert_ne!(official, cometix);
+    }
+
+    #[test]
+    fn deletes_cometix_session_only_through_its_own_root() {
+        let root = tempdir().expect("Cometix root");
+        let source = root.path().join("cometix-session.jsonl");
+        std::fs::write(
+            &source,
+            concat!(
+                "{\"sessionId\":\"cometix-session\",\"cwd\":\"/tmp/project\",\"timestamp\":\"2026-03-06T10:00:00Z\"}\n",
+                "{\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"timestamp\":\"2026-03-06T10:01:00Z\"}\n"
+            ),
+        )
+        .expect("write Cometix session");
+
+        let deleted = delete_session_with_roots(
+            "claude-cometix",
+            "cometix-session",
+            &source,
+            &[root.path().to_path_buf()],
+        )
+        .expect("delete Cometix session");
+
+        assert!(deleted);
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn cometix_delete_rejects_an_official_claude_session_path() {
+        let cometix_root = tempdir().expect("Cometix root");
+        let official_root = tempdir().expect("official Claude root");
+        let official_source = official_root.path().join("official-session.jsonl");
+        std::fs::write(
+            &official_source,
+            "{\"sessionId\":\"official-session\",\"timestamp\":\"2026-03-06T10:00:00Z\"}\n",
+        )
+        .expect("write official session");
+
+        let error = delete_session_with_roots(
+            "claude-cometix",
+            "official-session",
+            &official_source,
+            &[cometix_root.path().to_path_buf()],
+        )
+        .expect_err("Cometix must reject official Claude history paths");
+
+        assert!(error.contains("outside provider roots"));
+        assert!(official_source.exists());
+    }
+
+    #[test]
+    fn cometix_load_rejects_an_official_claude_session_path() {
+        let cometix_root = tempdir().expect("Cometix root");
+        let official_root = tempdir().expect("official Claude root");
+        let official_source = official_root.path().join("official-session.jsonl");
+        std::fs::write(
+            &official_source,
+            "{\"message\":{\"role\":\"user\",\"content\":\"official secret\"}}\n",
+        )
+        .expect("write official session");
+
+        let error = load_messages_with_roots(
+            "claude-cometix",
+            &official_source,
+            &[cometix_root.path().to_path_buf()],
+        )
+        .expect_err("Cometix must reject official Claude history paths");
+
+        assert!(error.contains("outside provider roots"));
+    }
+
+    #[test]
+    fn official_claude_load_rejects_a_cometix_session_path() {
+        let official_root = tempdir().expect("official Claude root");
+        let cometix_root = tempdir().expect("Cometix root");
+        let cometix_source = cometix_root.path().join("cometix-session.jsonl");
+        std::fs::write(
+            &cometix_source,
+            "{\"message\":{\"role\":\"user\",\"content\":\"Cometix secret\"}}\n",
+        )
+        .expect("write Cometix session");
+
+        let error = load_messages_with_roots(
+            "claude",
+            &cometix_source,
+            &[official_root.path().to_path_buf()],
+        )
+        .expect_err("official Claude must reject Cometix history paths");
+
+        assert!(error.contains("outside provider roots"));
     }
 
     #[test]

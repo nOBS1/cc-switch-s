@@ -113,7 +113,10 @@ export const getProviderLabel = (
   providerId: string,
   t: (key: string) => string,
 ) => {
-  const key = `apps.${providerId}`;
+  const key =
+    providerId === "claude-cometix"
+      ? "apps.claudeCometix"
+      : `apps.${providerId}`;
   const translated = t(key);
   return translated === key ? providerId : translated;
 };
@@ -122,7 +125,9 @@ export const getProviderLabel = (
 export const getProviderIconName = (providerId: string) => {
   if (providerId === "codex") return "openai";
   if (providerId === "grokbuild") return "grok";
-  if (providerId === "claude") return "claude";
+  if (providerId === "claude" || providerId === "claude-cometix") {
+    return "claude";
+  }
   if (providerId === "opencode") return "opencode";
   if (providerId === "openclaw") return "openclaw";
   return providerId;

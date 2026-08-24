@@ -222,6 +222,68 @@ describe("SessionManagerPage", () => {
     setSessionFixtures(sessions, messages);
   });
 
+  it("keeps official and Cometix Claude histories independently filterable", async () => {
+    setSessionFixtures(
+      [
+        {
+          providerId: "claude",
+          sessionId: "official-session",
+          title: "Official Claude History",
+          sourcePath: "/mock/claude/official.jsonl",
+          resumeCommand: "claude --resume official-session",
+        },
+        {
+          providerId: "claude-cometix",
+          sessionId: "cometix-session",
+          title: "Cometix Claude History",
+          sourcePath: "/mock/hlclaude/cometix.jsonl",
+          resumeCommand: "hlclaude --resume cometix-session",
+        },
+      ],
+      {
+        "claude:/mock/claude/official.jsonl": [],
+        "claude-cometix:/mock/hlclaude/cometix.jsonl": [],
+      },
+    );
+
+    renderPage("claude-cometix");
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Cometix Claude History",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Official Claude History"),
+    ).not.toBeInTheDocument();
+
+    const providerFilter = screen.getByRole("combobox", {
+      name: /供应商筛选/i,
+    });
+    await userEvent.click(providerFilter);
+    await userEvent.click(
+      await screen.findByText("Claude Code", { selector: "span" }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "Official Claude History",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Cometix Claude History"),
+    ).not.toBeInTheDocument();
+
+    await switchProviderFilter(/Cometix/i);
+    expect(
+      await screen.findByRole("heading", {
+        name: "Cometix Claude History",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Official Claude History"),
+    ).not.toBeInTheDocument();
+  });
+
   it("surfaces a relative Pi sessionDir instead of presenting an empty scan as authoritative", async () => {
     const discovery = vi.spyOn(piApi, "getSessionDiscovery").mockResolvedValue({
       status: "requires_project_context",

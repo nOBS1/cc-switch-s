@@ -230,6 +230,26 @@ describe("App integration with MSW", () => {
     getAllSpy.mockRestore();
   }, 10_000);
 
+  it("keeps session history management visible for Claude Code (Cometix)", async () => {
+    localStorage.setItem("cc-switch-last-app", "codex");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(await screen.findByText("switch-cometix"));
+
+    await waitFor(() => {
+      expect(screen.getByTitle("sessionManager.title")).toHaveClass(
+        "opacity-100",
+      );
+    });
+
+    fireEvent.click(screen.getByTitle("sessionManager.title"));
+    expect(
+      await screen.findByText("sessionManager.title", { selector: "h1" }),
+    ).toBeInTheDocument();
+  });
+
   it("covers basic provider flows via real hooks", async () => {
     const { default: App } = await import("@/App");
     renderApp(App);

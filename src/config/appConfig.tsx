@@ -103,6 +103,24 @@ export function isMcpAppId(appId: string): appId is McpAppId {
   return (MCP_APP_IDS as string[]).includes(appId);
 }
 
+/** Apps whose local session history can be scanned and managed safely. */
+export type SessionAppId = Exclude<AppId, "claude-desktop">;
+export const SESSION_APP_IDS: SessionAppId[] = [
+  "claude",
+  "claude-cometix",
+  "codex",
+  "gemini",
+  "grokbuild",
+  "opencode",
+  "openclaw",
+  "hermes",
+  "pi",
+];
+
+export function isSessionAppId(appId: string): appId is SessionAppId {
+  return (SESSION_APP_IDS as string[]).includes(appId);
+}
+
 export const APP_ICON_MAP: Record<AppId, AppConfig> = {
   claude: {
     label: "Claude",

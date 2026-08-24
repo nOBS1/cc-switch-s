@@ -87,6 +87,7 @@ type ProviderFilter =
   | "codex"
   | "grokbuild"
   | "claude"
+  | "claude-cometix"
   | "opencode"
   | "openclaw"
   | "gemini"
@@ -1096,7 +1097,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                             <TooltipContent>
                               {providerFilter === "all"
                                 ? t("sessionManager.providerFilterAll")
-                                : providerFilter}
+                                : getProviderLabel(providerFilter, t)}
                             </TooltipContent>
                           </Tooltip>
                           <SelectContent>
@@ -1140,6 +1141,16 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                                   size={14}
                                 />
                                 <span>Claude Code</span>
+                              </div>
+                            </SelectItem>
+                            <SelectItem value="claude-cometix">
+                              <div className="flex items-center gap-2">
+                                <ProviderIcon
+                                  icon="claude"
+                                  name="claude-cometix"
+                                  size={14}
+                                />
+                                <span>{t("apps.claudeCometix")}</span>
                               </div>
                             </SelectItem>
                             <SelectItem value="opencode">
