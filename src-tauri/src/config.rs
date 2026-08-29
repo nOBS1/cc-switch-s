@@ -591,7 +591,7 @@ mod tests {
 
         let cargo_lock = include_str!("../Cargo.lock").replace("\r\n", "\n");
         assert!(
-            cargo_lock.contains("[[package]]\nname = \"cc-switch-cometix\"\nversion = \"3.20.0\"")
+            cargo_lock.contains("[[package]]\nname = \"cc-switch-cometix\"\nversion = \"3.20.1\"")
         );
 
         let linux_handler_source = include_str!("lib.rs");

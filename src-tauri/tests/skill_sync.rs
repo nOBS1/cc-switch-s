@@ -18,13 +18,14 @@ fn write_skill(dir: &std::path::Path, name: &str) {
 }
 
 #[cfg(unix)]
-fn symlink_dir(src: &std::path::Path, dest: &std::path::Path) {
+fn symlink_dir(src: &std::path::Path, dest: &std::path::Path) -> bool {
     std::os::unix::fs::symlink(src, dest).expect("create symlink");
+    true
 }
 
 #[cfg(windows)]
-fn symlink_dir(src: &std::path::Path, dest: &std::path::Path) {
-    std::os::windows::fs::symlink_dir(src, dest).expect("create symlink");
+fn symlink_dir(src: &std::path::Path, dest: &std::path::Path) -> bool {
+    std::os::windows::fs::symlink_dir(src, dest).is_ok()
 }
 
 #[test]
@@ -334,8 +335,12 @@ fn sync_to_app_removes_disabled_and_orphaned_ssot_symlinks() {
 
     let opencode_skills_dir = home.join(".config").join("opencode").join("skills");
     fs::create_dir_all(&opencode_skills_dir).expect("create opencode skills dir");
-    symlink_dir(&disabled_skill, &opencode_skills_dir.join("disabled-skill"));
-    symlink_dir(&orphan_skill, &opencode_skills_dir.join("orphan-skill"));
+    if !symlink_dir(&disabled_skill, &opencode_skills_dir.join("disabled-skill"))
+        || !symlink_dir(&orphan_skill, &opencode_skills_dir.join("orphan-skill"))
+    {
+        // Windows may require Developer Mode or SeCreateSymbolicLinkPrivilege.
+        return;
+    }
 
     let state = create_test_state().expect("create test state");
     state

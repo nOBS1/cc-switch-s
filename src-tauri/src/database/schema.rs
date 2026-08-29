@@ -301,12 +301,20 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         // 18. Session Log Sync 表 (会话日志同步状态)
+        //
+        // last_byte_offset：Claude 路径的字节游标（seek 增量读）；NULL 表示
+        // 尚无字节游标（旧行号游标或非 Claude 路径行），此时回退全量读。
+        // last_tail_fingerprint：游标边界前尾部字节的指纹，用于识别文件被
+        // 外部重写（同尺寸/更大的替换无法靠 size 检测）；NULL 表示无指纹
+        // 可校验，按纯追加处理。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS session_log_sync (
                 file_path TEXT PRIMARY KEY,
                 last_modified INTEGER NOT NULL,
                 last_line_offset INTEGER NOT NULL DEFAULT 0,
-                last_synced_at INTEGER NOT NULL
+                last_synced_at INTEGER NOT NULL,
+                last_byte_offset INTEGER,
+                last_tail_fingerprint INTEGER
             )",
             [],
         )
@@ -544,10 +552,15 @@ impl Database {
                     }
                     17 => {
                         log::info!(
-                            "迁移数据库从 v17 到 v18（补齐独立 Cometix 域并使用独立代理端口）"
+                            "迁移数据库从 v17 到 v18（合并 Cometix 独立域、代理端口与会话日志字节游标）"
                         );
                         Self::migrate_v17_to_v18(conn)?;
                         Self::set_user_version(conn, 18)?;
+                    }
+                    18 => {
+                        log::info!("迁移数据库从 v18 到 v19（兼容上游与 Cometix 的 v18 数据库）");
+                        Self::migrate_v18_to_v19(conn)?;
+                        Self::set_user_version(conn, 19)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1596,18 +1609,34 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_session_usage_dedup_semantic
              ON session_usage_dedup(data_source, semantic_id, has_entry_id);",
         )
-        .map_err(|error| AppError::Database(format!("创建会话用量去重账本失败: {error}")))?;
+        .map_err(|error| AppError::Database(format!("创建会话用量去重账本失败: {error}")))
+    }
+
+    fn has_any_cometix_domain_column(conn: &Connection) -> Result<bool, AppError> {
+        let mcp_has_column = Self::table_exists(conn, "mcp_servers")?
+            && Self::has_column(conn, "mcp_servers", "enabled_claude_cometix")?;
+        let skills_has_column = Self::table_exists(conn, "skills")?
+            && Self::has_column(conn, "skills", "enabled_claude_cometix")?;
+        Ok(mcp_has_column || skills_has_column)
+    }
+
+    /// Add upstream's byte cursor and tail fingerprint columns idempotently.
+    /// Existing rows remain NULL so their first scan can convert the legacy
+    /// line cursor without losing or double-counting usage.
+    fn ensure_session_log_byte_cursor_columns(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "session_log_sync")? {
+            Self::add_column_if_missing(conn, "session_log_sync", "last_byte_offset", "INTEGER")?;
+            Self::add_column_if_missing(
+                conn,
+                "session_log_sync",
+                "last_tail_fingerprint",
+                "INTEGER",
+            )?;
+        }
         Ok(())
     }
 
-    /// v17 -> v18: move only the inherited upstream default to the fork port.
-    /// This runs once, so later user choices (including an explicit 15721) are
-    /// never rewritten. Ephemeral port 0 and every other custom port survive.
-    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
-        // Upstream v17 databases contain the dedup ledger but not the fork's
-        // Cometix columns. Backfill them before applying the fork migration.
-        Self::ensure_cometix_domain_columns(conn)?;
-
+    fn migrate_inherited_proxy_default_to_fork_port(conn: &Connection) -> Result<(), AppError> {
         if !Self::table_exists(conn, "proxy_config")?
             || !Self::has_column(conn, "proxy_config", "listen_port")?
         {
@@ -1618,7 +1647,35 @@ impl Database {
             "UPDATE proxy_config SET listen_port = ?1 WHERE listen_port = ?2",
             params![DEFAULT_PROXY_PORT, 15721],
         )
-        .map_err(|e| AppError::Database(format!("v17 -> v18 更新默认代理端口失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("更新继承的默认代理端口失败: {e}")))?;
+        Ok(())
+    }
+
+    /// v17 -> v18: converge the fork and upstream changes that independently
+    /// used schema v18. A v17 database has run neither migration, so both the
+    /// Cometix domain/port migration and the byte-cursor migration are needed.
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        Self::ensure_cometix_domain_columns(conn)?;
+        Self::migrate_inherited_proxy_default_to_fork_port(conn)?;
+        Self::ensure_session_log_byte_cursor_columns(conn)?;
+        Ok(())
+    }
+
+    /// v18 -> v19: repair the schema-number collision between upstream v18
+    /// (byte cursors) and the earlier Cometix v18 (independent domain/port).
+    ///
+    /// Presence of either Cometix column proves the fork's one-time port
+    /// migration already ran. In that case an explicit later choice of 15721
+    /// remains user-owned and must not be rewritten. Official v18 databases
+    /// have neither column, so their inherited default is moved to the fork
+    /// port before the Cometix columns are added.
+    fn migrate_v18_to_v19(conn: &Connection) -> Result<(), AppError> {
+        let had_cometix_domain = Self::has_any_cometix_domain_column(conn)?;
+        Self::ensure_cometix_domain_columns(conn)?;
+        if !had_cometix_domain {
+            Self::migrate_inherited_proxy_default_to_fork_port(conn)?;
+        }
+        Self::ensure_session_log_byte_cursor_columns(conn)?;
         Ok(())
     }
 
@@ -3492,8 +3549,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_upstream_v17_to_v18_backfills_cometix_and_changes_only_default_port(
-    ) -> Result<(), AppError> {
+    fn migrate_v17_to_v19_converges_cometix_and_upstream_changes() -> Result<(), AppError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(
             "CREATE TABLE mcp_servers (
@@ -3508,13 +3564,20 @@ mod tests {
                 app_type TEXT PRIMARY KEY,
                 listen_port INTEGER NOT NULL
              );
+             CREATE TABLE session_log_sync (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                last_line_offset INTEGER NOT NULL DEFAULT 0,
+                last_synced_at INTEGER NOT NULL
+             );
              INSERT INTO mcp_servers (id, enabled_claude) VALUES ('mcp-1', 1);
              INSERT INTO skills (id, enabled_claude) VALUES ('skill-1', 1);
              INSERT INTO proxy_config (app_type, listen_port) VALUES
                 ('claude', 15721),
                 ('codex', 0),
                 ('gemini', 16001),
-                ('grokbuild', 15721);",
+                ('grokbuild', 15721);
+             INSERT INTO session_log_sync VALUES ('/tmp/a.jsonl', 5, 3, 1);",
         )?;
         Database::set_user_version(&conn, 17)?;
 
@@ -3530,6 +3593,16 @@ mod tests {
             "skills",
             "enabled_claude_cometix"
         )?);
+        assert!(Database::has_column(
+            &conn,
+            "session_log_sync",
+            "last_byte_offset"
+        )?);
+        assert!(Database::has_column(
+            &conn,
+            "session_log_sync",
+            "last_tail_fingerprint"
+        )?);
         for (app_type, expected_port) in [
             ("claude", 15731),
             ("codex", 0),
@@ -3543,6 +3616,135 @@ mod tests {
             )?;
             assert_eq!(actual_port, expected_port, "unexpected port for {app_type}");
         }
+        let cursors: (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT last_byte_offset, last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = '/tmp/a.jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(cursors, (None, None));
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_upstream_v18_to_v19_backfills_cometix_without_losing_cursors() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE mcp_servers (
+                id TEXT PRIMARY KEY,
+                enabled_claude BOOLEAN NOT NULL DEFAULT 0
+             );
+             CREATE TABLE skills (
+                id TEXT PRIMARY KEY,
+                enabled_claude BOOLEAN NOT NULL DEFAULT 0
+             );
+             CREATE TABLE proxy_config (
+                app_type TEXT PRIMARY KEY,
+                listen_port INTEGER NOT NULL
+             );
+             CREATE TABLE session_log_sync (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                last_line_offset INTEGER NOT NULL DEFAULT 0,
+                last_synced_at INTEGER NOT NULL,
+                last_byte_offset INTEGER,
+                last_tail_fingerprint INTEGER
+             );
+             INSERT INTO mcp_servers (id, enabled_claude) VALUES ('mcp-1', 1);
+             INSERT INTO skills (id, enabled_claude) VALUES ('skill-1', 1);
+             INSERT INTO proxy_config (app_type, listen_port) VALUES
+                ('claude', 15721),
+                ('codex', 0);
+             INSERT INTO session_log_sync VALUES ('/tmp/a.jsonl', 5, 3, 1, 128, 456);",
+        )?;
+        Database::set_user_version(&conn, 18)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert!(Database::has_column(
+            &conn,
+            "mcp_servers",
+            "enabled_claude_cometix"
+        )?);
+        assert!(Database::has_column(
+            &conn,
+            "skills",
+            "enabled_claude_cometix"
+        )?);
+        let claude_port: i64 = conn.query_row(
+            "SELECT listen_port FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(claude_port, 15731);
+        let cursors: (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT last_byte_offset, last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = '/tmp/a.jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(cursors, (Some(128), Some(456)));
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_cometix_v18_to_v19_adds_cursors_without_rewriting_user_port() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE mcp_servers (
+                id TEXT PRIMARY KEY,
+                enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+                enabled_claude_cometix BOOLEAN NOT NULL DEFAULT 0
+             );
+             CREATE TABLE skills (
+                id TEXT PRIMARY KEY,
+                enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+                enabled_claude_cometix BOOLEAN NOT NULL DEFAULT 0
+             );
+             CREATE TABLE proxy_config (
+                app_type TEXT PRIMARY KEY,
+                listen_port INTEGER NOT NULL
+             );
+             CREATE TABLE session_log_sync (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                last_line_offset INTEGER NOT NULL DEFAULT 0,
+                last_synced_at INTEGER NOT NULL
+             );
+             INSERT INTO mcp_servers VALUES ('mcp-1', 1, 1);
+             INSERT INTO skills VALUES ('skill-1', 1, 1);
+             INSERT INTO proxy_config VALUES ('claude', 15721);
+             INSERT INTO session_log_sync VALUES ('/tmp/a.jsonl', 5, 3, 1);",
+        )?;
+        Database::set_user_version(&conn, 18)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        let claude_port: i64 = conn.query_row(
+            "SELECT listen_port FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(claude_port, 15721, "explicit user port must be preserved");
+        let cometix_flags: (i64, i64) = conn.query_row(
+            "SELECT
+                (SELECT enabled_claude_cometix FROM mcp_servers WHERE id = 'mcp-1'),
+                (SELECT enabled_claude_cometix FROM skills WHERE id = 'skill-1')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(cometix_flags, (1, 1));
+        let cursors: (Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT last_byte_offset, last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = '/tmp/a.jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(cursors, (None, None));
         assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
         Ok(())
     }
