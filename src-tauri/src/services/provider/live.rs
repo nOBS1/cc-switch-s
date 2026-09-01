@@ -109,7 +109,10 @@ fn merge_cometix_provider_into_live(target: &mut Value, provider_settings: &Valu
 /// the same field (provider credentials must win over an unauthenticated live
 /// file). The legacy file is copied from, never removed.
 pub(super) fn migrate_cometix_live_config_if_needed(state: &AppState) -> Result<bool, AppError> {
+    crate::fork_policy::ensure_app_management_allowed(&AppType::ClaudeCometix)?;
     let target_config_dir = crate::config::get_claude_cometix_config_dir();
+    let target_path = target_config_dir.join("settings.json");
+    crate::fork_policy::ensure_cometix_managed_config_path_isolated(&target_path)?;
     let target_config_dir_key = target_config_dir.to_string_lossy();
     if crate::settings::get_cometix_hlclaude_live_v2_migration()
         .is_some_and(|migration| migration.target_config_dir == target_config_dir_key.as_ref())
@@ -121,7 +124,6 @@ pub(super) fn migrate_cometix_live_config_if_needed(state: &AppState) -> Result<
     let legacy_path = crate::config::get_home_dir()
         .join(".claude-cometix")
         .join("settings.json");
-    let target_path = target_config_dir.join("settings.json");
     let mut merged = if target_path.exists() {
         read_json_file(&target_path)?
     } else {
@@ -1386,6 +1388,7 @@ impl LiveSnapshot {
     pub(crate) fn restore(&self) -> Result<(), AppError> {
         match self {
             LiveSnapshot::Claude { settings } => {
+                crate::fork_policy::ensure_app_management_allowed(&AppType::Claude)?;
                 let path = get_claude_settings_path();
                 if let Some(value) = settings {
                     write_json_file(&path, value)?;
@@ -1439,9 +1442,13 @@ impl LiveSnapshot {
 
 /// Write live configuration snapshot for a provider
 pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Result<(), AppError> {
+    crate::fork_policy::ensure_app_management_allowed(app_type)?;
     match app_type {
         AppType::Claude | AppType::ClaudeCometix => {
             let path = claude_settings_path_for(app_type);
+            if matches!(app_type, AppType::ClaudeCometix) {
+                crate::fork_policy::ensure_cometix_managed_config_path_isolated(&path)?;
+            }
             let settings = sanitize_claude_settings_for_live(&provider.settings_config);
             write_json_file(&path, &settings)?;
         }
@@ -2561,6 +2568,100 @@ mod tests {
     use super::*;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
     use serde_json::json;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    struct TestHome {
+        _dir: tempfile::TempDir,
+        original_test_home: Option<OsString>,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp home");
+            let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            crate::settings::reload_settings().expect("reload isolated settings");
+            Self {
+                _dir: dir,
+                original_test_home,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self._dir.path()
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match &self.original_test_home {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = crate::settings::reload_settings();
+        }
+    }
+
+    #[cfg(unix)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        std::os::unix::fs::symlink(source, destination).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(source, destination).is_ok() {
+            return true;
+        }
+
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(destination)
+            .arg(source)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    #[serial]
+    fn production_cometix_live_migration_rejects_alias_to_official_claude() {
+        let home = TestHome::new();
+        let official = home.path().join(".claude");
+        let cometix = home.path().join(".hlclaude");
+        let legacy = home.path().join(".claude-cometix");
+        std::fs::create_dir_all(&official).expect("official Claude dir");
+        std::fs::create_dir_all(&legacy).expect("legacy Cometix dir");
+        assert!(
+            alias_directory(&official, &cometix),
+            "create Cometix alias to official Claude"
+        );
+
+        let official_sentinel = json!({"owner": "official", "theme": "official"});
+        write_json_file(&official.join("settings.json"), &official_sentinel)
+            .expect("official settings sentinel");
+        write_json_file(
+            &legacy.join("settings.json"),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://legacy-relay.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "legacy-token"
+                }
+            }),
+        )
+        .expect("legacy Cometix settings");
+
+        let state = AppState::new(Arc::new(Database::memory().expect("memory db")));
+        migrate_cometix_live_config_if_needed(&state)
+            .expect_err("production live migration must reject an alias to official Claude");
+
+        let official_after: Value =
+            read_json_file(&official.join("settings.json")).expect("read official sentinel");
+        assert_eq!(official_after, official_sentinel);
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&cometix).expect("remove test junction");
+    }
 
     #[test]
     fn proxy_oauth_codex_snapshot_neutralizes_official_auth_fallback() {

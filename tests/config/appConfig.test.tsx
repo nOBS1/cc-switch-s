@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { isAdditiveAppId, isSessionAppId } from "@/config/appConfig";
+import {
+  MCP_APP_IDS,
+  PROXY_APP_IDS,
+  SKILLS_APP_IDS,
+  isAdditiveAppId,
+  isSessionAppId,
+} from "@/config/appConfig";
 
 describe("appConfig provider lifecycle", () => {
   it.each(["opencode", "openclaw", "hermes", "pi"])(
@@ -24,5 +30,14 @@ describe("appConfig provider lifecycle", () => {
     expect(isSessionAppId("claude")).toBe(true);
     expect(isSessionAppId("claude-cometix")).toBe(true);
     expect(isSessionAppId("claude-desktop")).toBe(false);
+  });
+
+  it("excludes official Claude from every writable private-fork surface", () => {
+    expect(SKILLS_APP_IDS).not.toContain("claude");
+    expect(MCP_APP_IDS).not.toContain("claude");
+    expect(PROXY_APP_IDS).not.toContain("claude");
+
+    expect(SKILLS_APP_IDS).toContain("claude-cometix");
+    expect(MCP_APP_IDS).toContain("claude-cometix");
   });
 });

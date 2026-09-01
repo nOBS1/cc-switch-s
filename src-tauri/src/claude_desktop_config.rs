@@ -213,6 +213,27 @@ pub fn get_config_library_path() -> Result<PathBuf, AppError> {
     Ok(current_platform_paths()?.config_library_path)
 }
 
+/// Every directory owned by the single official Claude Desktop installation.
+/// Private-build Cometix paths must not overlap either the normal config root
+/// or the third-party profile/configLibrary root.
+pub(crate) fn get_protected_config_roots() -> Result<Vec<PathBuf>, AppError> {
+    let paths = current_platform_paths()?;
+    let mut roots = Vec::new();
+    if let Some(parent) = paths.normal_config_path.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    if let Some(parent) = paths.threep_config_path.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    if let Some(parent) = paths.config_library_path.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    roots.push(paths.config_library_path);
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
 pub fn default_proxy_routes() -> Vec<ClaudeDesktopDefaultRoute> {
     DEFAULT_PROXY_ROUTES.to_vec()
 }

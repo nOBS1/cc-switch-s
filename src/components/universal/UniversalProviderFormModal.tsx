@@ -14,6 +14,7 @@ import type { UniversalProvider, UniversalProviderModels } from "@/types";
 import {
   universalProviderPresets,
   createUniversalProviderFromPreset,
+  sanitizePrivateForkUniversalProvider,
   type UniversalProviderPreset,
 } from "@/config/universalProviderPresets";
 import { deepClone } from "@/utils/deepClone";
@@ -50,7 +51,6 @@ export function UniversalProviderFormModal({
   const [notes, setNotes] = useState("");
 
   // 应用启用状态
-  const [claudeEnabled, setClaudeEnabled] = useState(true);
   const [codexEnabled, setCodexEnabled] = useState(true);
   const [geminiEnabled, setGeminiEnabled] = useState(true);
 
@@ -71,7 +71,6 @@ export function UniversalProviderFormModal({
       setApiKey(editingProvider.apiKey);
       setWebsiteUrl(editingProvider.websiteUrl || "");
       setNotes(editingProvider.notes || "");
-      setClaudeEnabled(editingProvider.apps.claude);
       setCodexEnabled(editingProvider.apps.codex);
       setGeminiEnabled(editingProvider.apps.gemini);
       setModels(editingProvider.models || {});
@@ -90,7 +89,6 @@ export function UniversalProviderFormModal({
       setApiKey("");
       setWebsiteUrl(defaultPreset.websiteUrl || "");
       setNotes("");
-      setClaudeEnabled(defaultPreset.defaultApps.claude);
       setCodexEnabled(defaultPreset.defaultApps.codex);
       setGeminiEnabled(defaultPreset.defaultApps.gemini);
       setModels(deepClone(defaultPreset.defaultModels));
@@ -103,7 +101,6 @@ export function UniversalProviderFormModal({
       setSelectedPreset(preset);
       if (!isEditMode) {
         setName(preset.name);
-        setClaudeEnabled(preset.defaultApps.claude);
         setCodexEnabled(preset.defaultApps.codex);
         setGeminiEnabled(preset.defaultApps.gemini);
         setModels(deepClone(preset.defaultModels));
@@ -114,7 +111,7 @@ export function UniversalProviderFormModal({
 
   // 更新模型配置
   const updateModel = useCallback(
-    (app: "claude" | "codex" | "gemini", field: string, value: string) => {
+    (app: "codex" | "gemini", field: string, value: string) => {
       setModels((prev) => ({
         ...prev,
         [app]: {
@@ -125,25 +122,6 @@ export function UniversalProviderFormModal({
     },
     [],
   );
-
-  // 计算 Claude 配置 JSON 预览
-  const claudeConfigJson = useMemo(() => {
-    if (!claudeEnabled) return null;
-    const model = models.claude?.model || "claude-sonnet-4-20250514";
-    const haiku = models.claude?.haikuModel || "claude-haiku-4-20250514";
-    const sonnet = models.claude?.sonnetModel || "claude-sonnet-4-20250514";
-    const opus = models.claude?.opusModel || "claude-sonnet-4-20250514";
-    return {
-      env: {
-        ANTHROPIC_BASE_URL: baseUrl,
-        ANTHROPIC_AUTH_TOKEN: apiKey,
-        ANTHROPIC_MODEL: model,
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: haiku,
-        ANTHROPIC_DEFAULT_SONNET_MODEL: sonnet,
-        ANTHROPIC_DEFAULT_OPUS_MODEL: opus,
-      },
-    };
-  }, [claudeEnabled, baseUrl, apiKey, models.claude]);
 
   // 计算 Codex 配置 JSON 预览
   const codexConfigJson = useMemo(() => {
@@ -191,7 +169,7 @@ requires_openai_auth = true`;
       return;
     }
 
-    const provider: UniversalProvider = editingProvider
+    const providerDraft: UniversalProvider = editingProvider
       ? {
           ...editingProvider,
           name: name.trim(),
@@ -200,7 +178,7 @@ requires_openai_auth = true`;
           websiteUrl: websiteUrl.trim() || undefined,
           notes: notes.trim() || undefined,
           apps: {
-            claude: claudeEnabled,
+            claude: false,
             codex: codexEnabled,
             gemini: geminiEnabled,
           },
@@ -216,16 +194,17 @@ requires_openai_auth = true`;
 
     // 如果是新建，更新应用启用状态和模型
     if (!editingProvider) {
-      provider.apps = {
-        claude: claudeEnabled,
+      providerDraft.apps = {
+        claude: false,
         codex: codexEnabled,
         gemini: geminiEnabled,
       };
-      provider.models = models;
-      provider.websiteUrl = websiteUrl.trim() || undefined;
-      provider.notes = notes.trim() || undefined;
+      providerDraft.models = models;
+      providerDraft.websiteUrl = websiteUrl.trim() || undefined;
+      providerDraft.notes = notes.trim() || undefined;
     }
 
+    const provider = sanitizePrivateForkUniversalProvider(providerDraft);
     onSave(provider);
     onClose();
   }, [
@@ -235,7 +214,6 @@ requires_openai_auth = true`;
     apiKey,
     websiteUrl,
     notes,
-    claudeEnabled,
     codexEnabled,
     geminiEnabled,
     models,
@@ -250,7 +228,7 @@ requires_openai_auth = true`;
       return null;
     }
 
-    const provider: UniversalProvider = editingProvider
+    const providerDraft: UniversalProvider = editingProvider
       ? {
           ...editingProvider,
           name: name.trim(),
@@ -259,7 +237,7 @@ requires_openai_auth = true`;
           websiteUrl: websiteUrl.trim() || undefined,
           notes: notes.trim() || undefined,
           apps: {
-            claude: claudeEnabled,
+            claude: false,
             codex: codexEnabled,
             gemini: geminiEnabled,
           },
@@ -275,17 +253,17 @@ requires_openai_auth = true`;
 
     // 如果是新建，更新应用启用状态和模型
     if (!editingProvider) {
-      provider.apps = {
-        claude: claudeEnabled,
+      providerDraft.apps = {
+        claude: false,
         codex: codexEnabled,
         gemini: geminiEnabled,
       };
-      provider.models = models;
-      provider.websiteUrl = websiteUrl.trim() || undefined;
-      provider.notes = notes.trim() || undefined;
+      providerDraft.models = models;
+      providerDraft.websiteUrl = websiteUrl.trim() || undefined;
+      providerDraft.notes = notes.trim() || undefined;
     }
 
-    return provider;
+    return sanitizePrivateForkUniversalProvider(providerDraft);
   }, [
     editingProvider,
     name,
@@ -293,7 +271,6 @@ requires_openai_auth = true`;
     apiKey,
     websiteUrl,
     notes,
-    claudeEnabled,
     codexEnabled,
     geminiEnabled,
     models,
@@ -486,16 +463,6 @@ requires_openai_auth = true`;
           <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between rounded-lg border p-3">
               <div className="flex items-center gap-2">
-                <ProviderIcon icon="claude" name="Claude" size={20} />
-                <span className="font-medium">Claude Code</span>
-              </div>
-              <Switch
-                checked={claudeEnabled}
-                onCheckedChange={setClaudeEnabled}
-              />
-            </div>
-            <div className="flex items-center justify-between rounded-lg border p-3">
-              <div className="flex items-center gap-2">
                 <ProviderIcon icon="openai" name="Codex" size={20} />
                 <span className="font-medium">OpenAI Codex</span>
               </div>
@@ -522,60 +489,6 @@ requires_openai_auth = true`;
           <Label>
             {t("universalProvider.modelConfig", { defaultValue: "模型配置" })}
           </Label>
-
-          {/* Claude 模型 */}
-          {claudeEnabled && (
-            <div className="space-y-3 rounded-lg border p-4">
-              <div className="flex items-center gap-2 font-medium">
-                <ProviderIcon icon="claude" name="Claude" size={16} />
-                Claude
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1">
-                  <Label className="text-xs">
-                    {t("universalProvider.model", { defaultValue: "主模型" })}
-                  </Label>
-                  <Input
-                    value={models.claude?.model || ""}
-                    onChange={(e) =>
-                      updateModel("claude", "model", e.target.value)
-                    }
-                    placeholder="claude-sonnet-4-20250514"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Haiku</Label>
-                  <Input
-                    value={models.claude?.haikuModel || ""}
-                    onChange={(e) =>
-                      updateModel("claude", "haikuModel", e.target.value)
-                    }
-                    placeholder="claude-haiku-4-20250514"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Sonnet</Label>
-                  <Input
-                    value={models.claude?.sonnetModel || ""}
-                    onChange={(e) =>
-                      updateModel("claude", "sonnetModel", e.target.value)
-                    }
-                    placeholder="claude-sonnet-4-20250514"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Opus</Label>
-                  <Input
-                    value={models.claude?.opusModel || ""}
-                    onChange={(e) =>
-                      updateModel("claude", "opusModel", e.target.value)
-                    }
-                    placeholder="claude-sonnet-4-20250514"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
 
           {/* Codex 模型 */}
           {codexEnabled && (
@@ -635,7 +548,7 @@ requires_openai_auth = true`;
         </div>
 
         {/* 配置 JSON 预览 */}
-        {isEditMode && (claudeEnabled || codexEnabled || geminiEnabled) && (
+        {isEditMode && (codexEnabled || geminiEnabled) && (
           <div className="space-y-4">
             <Label>
               {t("universalProvider.configJsonPreview", {
@@ -648,22 +561,6 @@ requires_openai_auth = true`;
                   "以下是将要同步到各应用的配置内容（仅覆盖显示的字段，保留其他自定义配置）",
               })}
             </p>
-
-            {/* Claude JSON */}
-            {claudeConfigJson && (
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <ProviderIcon icon="claude" name="Claude" size={16} />
-                  Claude
-                </div>
-                <JsonEditor
-                  value={JSON.stringify(claudeConfigJson, null, 2)}
-                  onChange={() => {}}
-                  height={180}
-                  darkMode={isDarkMode}
-                />
-              </div>
-            )}
 
             {/* Codex JSON */}
             {codexConfigJson && (
@@ -707,7 +604,7 @@ requires_openai_auth = true`;
           defaultValue: "同步统一供应商",
         })}
         message={t("universalProvider.syncConfirmDescription", {
-          defaultValue: `同步 "${name}" 将会覆盖 Claude、Codex 和 Gemini 中关联的供应商配置。确定要继续吗？`,
+          defaultValue: `同步 "${name}" 将会覆盖 Codex 和 Gemini 中关联的供应商配置。确定要继续吗？`,
           name: name,
         })}
         confirmText={t("universalProvider.saveAndSync", {

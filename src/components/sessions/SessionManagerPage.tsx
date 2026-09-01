@@ -72,6 +72,7 @@ import {
   getSessionDirectoryGroupKey,
   getSessionKey,
   groupSessionsByProviderAndDirectory,
+  isSessionResumable,
   type SessionDirectoryGroup,
   type SessionProviderGroup,
   shouldHideCodexMessageFromToc,
@@ -107,6 +108,10 @@ type SessionGroupExpansionState = {
   expandedProviderIds: Set<string>;
   expandedDirectoryKeys: Set<string>;
 };
+
+/** Official history stays viewable; destructive deletion belongs upstream. */
+const isSessionDeletable = (session: SessionMeta): boolean =>
+  session.providerId !== "claude" && Boolean(session.sourcePath);
 
 const readInitialSessionListViewMode = (): SessionListViewMode => {
   if (typeof window === "undefined") return "flat";
@@ -430,7 +435,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   );
 
   const handleResume = async () => {
-    if (!selectedSession?.resumeCommand) return;
+    if (!selectedSession || !isSessionResumable(selectedSession)) return;
 
     if (!isMac()) {
       await handleCopy(
@@ -442,6 +447,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
 
     try {
       await sessionsApi.launchTerminal({
+        providerId: selectedSession.providerId,
         command: selectedSession.resumeCommand,
         cwd: selectedSession.projectDir ?? undefined,
       });
@@ -458,7 +464,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
       return;
     }
 
-    const targets = deleteTargets.filter((session) => session.sourcePath);
+    const targets = deleteTargets.filter(isSessionDeletable);
     setDeleteTargets(null);
 
     if (targets.length === 0) {
@@ -559,7 +565,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   };
 
   const deletableFilteredSessions = useMemo(
-    () => filteredSessions.filter((session) => Boolean(session.sourcePath)),
+    () => filteredSessions.filter(isSessionDeletable),
     [filteredSessions],
   );
 
@@ -572,7 +578,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   );
 
   const selectedDeletableSessions = useMemo(
-    () => selectedSessions.filter((session) => Boolean(session.sourcePath)),
+    () => selectedSessions.filter(isSessionDeletable),
     [selectedSessions],
   );
 
@@ -608,9 +614,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   const getGroupSelectionState = (
     groupSessions: SessionMeta[],
   ): GroupSelectionState => {
-    const selectableSessions = groupSessions.filter((session) =>
-      Boolean(session.sourcePath),
-    );
+    const selectableSessions = groupSessions.filter(isSessionDeletable);
     const selectedCount = selectableSessions.filter((session) =>
       selectedSessionKeys.has(getSessionKey(session)),
     ).length;
@@ -628,7 +632,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   };
 
   const toggleSessionChecked = (session: SessionMeta, checked: boolean) => {
-    if (!session.sourcePath) return;
+    if (!isSessionDeletable(session)) return;
     const key = getSessionKey(session);
     setSelectedSessionKeys((current) => {
       const next = new Set(current);
@@ -645,9 +649,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
     groupSessions: SessionMeta[],
     checked: boolean,
   ) => {
-    const selectableSessions = groupSessions.filter((session) =>
-      Boolean(session.sourcePath),
-    );
+    const selectableSessions = groupSessions.filter(isSessionDeletable);
     if (selectableSessions.length === 0) return;
 
     setSelectedSessionKeys((current) => {
@@ -705,7 +707,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
         selectionMode={selectionMode}
         searchQuery={search}
         isChecked={selectedSessionKeys.has(sessionKey)}
-        isCheckDisabled={!session.sourcePath}
+        isCheckDisabled={!isSessionDeletable(session)}
         onSelect={setSelectedKey}
         onToggleChecked={(checked) => toggleSessionChecked(session, checked)}
       />
@@ -1579,14 +1581,18 @@ export function SessionManagerPage({ appId }: { appId: string }) {
 
                       {/* 右侧：操作按钮组 */}
                       <div className="flex items-center gap-2 shrink-0">
-                        {isMac() && (
+                        {selectedSession.providerId === "claude" && (
+                          <Badge variant="outline" className="font-normal">
+                            {t("sessionManager.officialClaudeHistoryReadOnly")}
+                          </Badge>
+                        )}
+                        {isMac() && isSessionResumable(selectedSession) && (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
                                 size="sm"
                                 className="gap-1.5"
                                 onClick={() => void handleResume()}
-                                disabled={!selectedSession.resumeCommand}
                               >
                                 <Play className="size-3.5" />
                                 <span className="hidden sm:inline">
@@ -1597,13 +1603,9 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                               </Button>
                             </TooltipTrigger>
                             <TooltipContent>
-                              {selectedSession.resumeCommand
-                                ? t("sessionManager.resumeTooltip", {
-                                    defaultValue: "在终端中恢复此会话",
-                                  })
-                                : t("sessionManager.noResumeCommand", {
-                                    defaultValue: "此会话无法恢复",
-                                  })}
+                              {t("sessionManager.resumeTooltip", {
+                                defaultValue: "在终端中恢复此会话",
+                              })}
                             </TooltipContent>
                           </Tooltip>
                         )}
@@ -1617,7 +1619,8 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                                 setDeleteTargets([selectedSession])
                               }
                               disabled={
-                                !selectedSession.sourcePath || isDeleting
+                                !isSessionDeletable(selectedSession) ||
+                                isDeleting
                               }
                             >
                               <Trash2 className="size-3.5" />
@@ -1642,7 +1645,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                     </div>
 
                     {/* 恢复命令预览 */}
-                    {selectedSession.resumeCommand && (
+                    {isSessionResumable(selectedSession) && (
                       <div className="mt-3 flex items-center gap-2">
                         <div className="flex-1 rounded-md bg-muted/60 px-3 py-1.5 font-mono text-xs text-muted-foreground truncate">
                           {selectedSession.resumeCommand}

@@ -208,7 +208,11 @@ pub fn get_claude_mcp_path() -> PathBuf {
 
 /// 获取 Cometix Claude Code 的独立 MCP 配置文件路径。
 pub fn get_claude_cometix_mcp_path() -> PathBuf {
-    get_claude_cometix_config_dir().join(".claude.json")
+    claude_cometix_mcp_path_in(get_claude_cometix_config_dir())
+}
+
+fn claude_cometix_mcp_path_in(dir: PathBuf) -> PathBuf {
+    dir.join(".claude.json")
 }
 
 fn claude_settings_path_in(dir: PathBuf) -> PathBuf {
@@ -627,15 +631,19 @@ mod tests {
         let home = get_home_dir();
         let cometix_dir = home.join(".hlclaude");
         assert_eq!(get_default_claude_cometix_config_dir(), cometix_dir);
-        let active_cometix_dir = get_claude_cometix_config_dir();
+
+        // Exercise the pure path builders against the private default. Other
+        // parallel tests intentionally change the process-global directory
+        // override, so repeatedly reading the active setting here would make
+        // this invariant test observe two different snapshots.
+        let settings_path = claude_settings_path_in(cometix_dir.clone());
+        assert_eq!(settings_path.parent(), Some(cometix_dir.as_path()));
         assert_eq!(
-            get_claude_cometix_settings_path().parent(),
-            Some(active_cometix_dir.as_path())
+            claude_cometix_mcp_path_in(cometix_dir.clone()),
+            cometix_dir.join(".claude.json")
         );
-        assert_eq!(
-            get_claude_cometix_mcp_path(),
-            active_cometix_dir.join(".claude.json")
-        );
+        assert_ne!(settings_path, home.join(".claude/settings.json"));
+        assert_ne!(cometix_dir.join(".claude.json"), home.join(".claude.json"));
     }
 
     fn assert_atomic_write_replaces_existing_file(dir: &Path) {

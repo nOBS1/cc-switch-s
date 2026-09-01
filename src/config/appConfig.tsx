@@ -8,6 +8,10 @@ import {
   OpenClawIcon,
 } from "@/components/BrandIcons";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import {
+  filterManagementApps,
+  type PrivateForkManagementAppId,
+} from "@/utils/forkPolicy";
 
 export interface AppConfig {
   label: string;
@@ -29,6 +33,10 @@ export const APP_IDS: AppId[] = [
   "pi",
 ];
 
+/** Top-level applications this private fork may actively manage. */
+export const MANAGEMENT_APP_IDS: PrivateForkManagementAppId[] =
+  filterManagementApps(APP_IDS);
+
 export const DEFAULT_VISIBLE_APPS: VisibleApps = {
   claude: true,
   "claude-cometix": true,
@@ -43,7 +51,7 @@ export const DEFAULT_VISIBLE_APPS: VisibleApps = {
 };
 
 /** App IDs shown in Skills panels. */
-export const SKILLS_APP_IDS: AppId[] = [
+export const SKILLS_APP_IDS = filterManagementApps([
   "claude",
   "claude-cometix",
   "codex",
@@ -52,20 +60,20 @@ export const SKILLS_APP_IDS: AppId[] = [
   "opencode",
   "hermes",
   "pi",
-];
+] as const satisfies readonly AppId[]);
 
 export type ProxyAppId = Extract<
-  AppId,
+  PrivateForkManagementAppId,
   "claude" | "codex" | "gemini" | "grokbuild"
 >;
 
 /** Apps with a complete local gateway + failover data plane. */
-export const PROXY_APP_IDS: ProxyAppId[] = [
+export const PROXY_APP_IDS: ProxyAppId[] = filterManagementApps([
   "claude",
   "codex",
   "gemini",
   "grokbuild",
-];
+] as const satisfies readonly AppId[]);
 
 export function isProxyAppId(appId: string): appId is ProxyAppId {
   return (PROXY_APP_IDS as string[]).includes(appId);
@@ -88,8 +96,8 @@ export function isAdditiveAppId(appId: string): appId is AdditiveAppId {
 }
 
 /** Pi has no native MCP registry; do not manufacture a disabled mirror. */
-export type McpAppId = Exclude<AppId, "claude-desktop" | "openclaw" | "pi">;
-export const MCP_APP_IDS: McpAppId[] = [
+export type McpAppId = Exclude<PrivateForkManagementAppId, "openclaw" | "pi">;
+export const MCP_APP_IDS: McpAppId[] = filterManagementApps([
   "claude",
   "claude-cometix",
   "codex",
@@ -97,7 +105,7 @@ export const MCP_APP_IDS: McpAppId[] = [
   "grokbuild",
   "opencode",
   "hermes",
-];
+] as const satisfies readonly AppId[]);
 
 export function isMcpAppId(appId: string): appId is McpAppId {
   return (MCP_APP_IDS as string[]).includes(appId);

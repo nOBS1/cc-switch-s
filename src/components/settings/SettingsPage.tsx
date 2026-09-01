@@ -52,7 +52,6 @@ import { UsageDashboard } from "@/components/usage/UsageDashboard";
 import { LogConfigPanel } from "@/components/settings/LogConfigPanel";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import { CodexAuthSettings } from "@/components/settings/CodexAuthSettings";
-import { useInstalledSkills } from "@/hooks/useSkills";
 import { useSettings } from "@/hooks/useSettings";
 import { useImportExport } from "@/hooks/useImportExport";
 import { useTranslation } from "react-i18next";
@@ -104,8 +103,6 @@ export function SettingsPage({
     clearSelection,
     resetStatus,
   } = useImportExport({ onImportSuccess });
-
-  const { data: installedSkills } = useInstalledSkills();
 
   const [activeTab, setActiveTab] = useState<string>("general");
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
@@ -261,13 +258,7 @@ export function SettingsPage({
                       settings={settings}
                       onChange={handleAutoSave}
                     />
-                    <SkillStorageLocationSettings
-                      value={settings.skillStorageLocation ?? "cc_switch"}
-                      installedCount={installedSkills?.length ?? 0}
-                      onMigrated={(location) =>
-                        updateSettings({ skillStorageLocation: location })
-                      }
-                    />
+                    <SkillStorageLocationSettings />
                     <SkillSyncMethodSettings
                       value={settings.skillSyncMethod ?? "auto"}
                       onChange={(method) =>
@@ -349,7 +340,6 @@ export function SettingsPage({
                             onAppConfigChange={updateAppConfigDir}
                             onBrowseAppConfig={browseAppConfigDir}
                             onResetAppConfig={resetAppConfigDir}
-                            claudeDir={settings.claudeConfigDir}
                             claudeCometixDir={settings.claudeCometixConfigDir}
                             codexDir={settings.codexConfigDir}
                             geminiDir={settings.geminiConfigDir}

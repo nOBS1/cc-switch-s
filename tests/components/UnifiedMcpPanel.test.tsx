@@ -71,6 +71,7 @@ function makeServer(id: string, overrides: ServerOverrides = {}): McpServer {
     },
     apps: {
       claude: false,
+      "claude-cometix": false,
       codex: false,
       gemini: false,
       grokbuild: false,
@@ -208,15 +209,15 @@ describe("UnifiedMcpPanel", () => {
     mocks.serversMap = {
       visible: makeServer("visible", {
         name: "Visible Needle",
-        apps: { claude: false },
+        apps: { "claude-cometix": false },
       }),
       "hidden-disabled": makeServer("hidden-disabled", {
         name: "Hidden Disabled",
-        apps: { claude: false },
+        apps: { "claude-cometix": false },
       }),
       "hidden-enabled": makeServer("hidden-enabled", {
         name: "Hidden Enabled",
-        apps: { claude: true },
+        apps: { "claude-cometix": true },
       }),
     };
     mocks.bulkToggle.mockResolvedValue({
@@ -233,13 +234,15 @@ describe("UnifiedMcpPanel", () => {
     expect(screen.getByText("Visible Needle")).toBeInTheDocument();
     expect(screen.queryByText("Hidden Disabled")).not.toBeInTheDocument();
     expect(screen.queryByText("Hidden Enabled")).not.toBeInTheDocument();
+    expect(screen.queryByText("Claude:")).not.toBeInTheDocument();
+    expect(screen.getByText("Claude Code (Cometix):")).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("checkbox")[0]);
 
     await waitFor(() => {
       expect(mocks.bulkToggle).toHaveBeenCalledWith({
         serverIds: ["visible", "hidden-disabled"],
-        app: "claude",
+        app: "claude-cometix",
         enabled: true,
       });
     });
@@ -252,7 +255,7 @@ describe("UnifiedMcpPanel", () => {
     mocks.bulkPending = true;
     mocks.bulkVariables = {
       serverIds: ["server"],
-      app: "claude",
+      app: "claude-cometix",
       enabled: true,
     };
     const onInteractionBlockedChange = vi.fn();

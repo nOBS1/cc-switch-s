@@ -15,6 +15,7 @@ pub struct ConfigService;
 impl ConfigService {
     /// 为当前 config.json 创建备份，返回备份 ID（若文件不存在则返回空字符串）。
     pub fn create_backup(config_path: &Path) -> Result<String, AppError> {
+        crate::app_store::ensure_private_app_data_path_isolated(config_path)?;
         if !config_path.exists() {
             return Ok(String::new());
         }
@@ -26,10 +27,12 @@ impl ConfigService {
             .parent()
             .ok_or_else(|| AppError::Config("Invalid config path".into()))?
             .join("backups");
+        crate::app_store::ensure_private_app_data_path_isolated(&backup_dir)?;
 
         fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
         let backup_path = backup_dir.join(format!("{backup_id}.json"));
+        crate::app_store::ensure_private_app_data_path_isolated(&backup_path)?;
         let contents = fs::read(config_path).map_err(|e| AppError::io(config_path, e))?;
         fs::write(&backup_path, contents).map_err(|e| AppError::io(&backup_path, e))?;
 
@@ -39,6 +42,7 @@ impl ConfigService {
     }
 
     fn cleanup_old_backups(backup_dir: &Path, retain: usize) -> Result<(), AppError> {
+        crate::app_store::ensure_private_app_data_path_isolated(backup_dir)?;
         if retain == 0 {
             return Ok(());
         }
@@ -71,6 +75,7 @@ impl ConfigService {
         });
 
         for entry in sorted.into_iter().take(remove_count) {
+            crate::app_store::ensure_private_app_data_path_isolated(&entry.path())?;
             if let Err(err) = fs::remove_file(entry.path()) {
                 log::warn!(
                     "Failed to remove old backup {}: {}",
@@ -85,11 +90,18 @@ impl ConfigService {
 
     /// 同步当前供应商到对应的 live 配置。
     pub fn sync_current_providers_to_live(config: &mut MultiAppConfig) -> Result<(), AppError> {
-        Self::sync_current_provider_for_app(config, &AppType::Claude)?;
-        Self::sync_current_provider_for_app(config, &AppType::ClaudeCometix)?;
-        Self::sync_current_provider_for_app(config, &AppType::Codex)?;
-        Self::sync_current_provider_for_app(config, &AppType::Gemini)?;
-        Self::sync_current_provider_for_app(config, &AppType::GrokBuild)?;
+        for app in [
+            AppType::Claude,
+            AppType::ClaudeCometix,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::GrokBuild,
+        ]
+        .into_iter()
+        .filter(crate::fork_policy::app_management_allowed)
+        {
+            Self::sync_current_provider_for_app(config, &app)?;
+        }
         Ok(())
     }
 
@@ -224,10 +236,15 @@ impl ConfigService {
     ) -> Result<(), AppError> {
         use crate::config::{read_json_file, write_json_file};
 
+        crate::fork_policy::ensure_app_management_allowed(app_type)?;
+
         let settings_path = match app_type {
             AppType::ClaudeCometix => crate::config::get_claude_cometix_settings_path(),
             _ => crate::config::get_claude_settings_path(),
         };
+        if matches!(app_type, AppType::ClaudeCometix) {
+            crate::fork_policy::ensure_cometix_managed_config_path_isolated(&settings_path)?;
+        }
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }

@@ -5,8 +5,9 @@ import { Button } from "@/components/ui/button";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import type { ResolvedDirectories } from "@/hooks/useSettings";
+import type { PrivateForkManagementAppId } from "@/utils/forkPolicy";
 
-type DirectoryAppId = Exclude<AppId, "claude-desktop">;
+type DirectoryAppId = Extract<AppId, PrivateForkManagementAppId>;
 
 interface DirectorySettingsProps {
   appConfigDir?: string;
@@ -14,7 +15,6 @@ interface DirectorySettingsProps {
   onAppConfigChange: (value?: string) => void;
   onBrowseAppConfig: () => Promise<void>;
   onResetAppConfig: () => Promise<void>;
-  claudeDir?: string;
   claudeCometixDir?: string;
   codexDir?: string;
   geminiDir?: string;
@@ -34,7 +34,6 @@ export function DirectorySettings({
   onAppConfigChange,
   onBrowseAppConfig,
   onResetAppConfig,
-  claudeDir,
   claudeCometixDir,
   codexDir,
   geminiDir,
@@ -98,17 +97,6 @@ export function DirectorySettings({
             {t("settings.configDirectoryDescription")}
           </p>
         </header>
-
-        <DirectoryInput
-          label={t("settings.claudeConfigDir")}
-          description={undefined}
-          value={claudeDir}
-          resolvedValue={resolvedDirs.claude}
-          placeholder={t("settings.browsePlaceholderClaude")}
-          onChange={(val) => onDirectoryChange("claude", val)}
-          onBrowse={() => onBrowseDirectory("claude")}
-          onReset={() => onResetDirectory("claude")}
-        />
 
         <DirectoryInput
           label={t("settings.claudeCometixConfigDir", {

@@ -2,13 +2,7 @@ import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import {
-  piApi,
-  providersApi,
-  settingsApi,
-  openclawApi,
-  type AppId,
-} from "@/lib/api";
+import { piApi, providersApi, openclawApi, type AppId } from "@/lib/api";
 import type {
   Provider,
   UsageScript,
@@ -53,33 +47,6 @@ export function useProviderActions(
   const updateProviderMutation = useUpdateProviderMutation(activeApp);
   const deleteProviderMutation = useDeleteProviderMutation(activeApp);
   const switchProviderMutation = useSwitchProviderMutation(activeApp);
-
-  // Claude 插件同步逻辑
-  const syncClaudePlugin = useCallback(
-    async (provider: Provider) => {
-      if (activeApp !== "claude") return;
-
-      try {
-        const settings = await settingsApi.get();
-        if (!settings?.enableClaudePluginIntegration) {
-          return;
-        }
-
-        const isOfficial = provider.category === "official";
-        await settingsApi.applyClaudePluginConfig({ official: isOfficial });
-
-        // 静默执行，不显示成功通知
-      } catch (error) {
-        const detail =
-          extractErrorMessage(error) ||
-          t("notifications.syncClaudePluginFailed", {
-            defaultValue: "同步 Claude 插件失败",
-          });
-        toast.error(detail, { duration: 4200 });
-      }
-    },
-    [activeApp, t],
-  );
 
   // 添加供应商
   const addProvider = useCallback(
@@ -296,7 +263,6 @@ export function useProviderActions(
 
       try {
         const result = await switchProviderMutation.mutateAsync(provider.id);
-        await syncClaudePlugin(provider);
 
         // Surface switch warnings by code — a generic "backfill failed"
         // message for an auth-cleanup warning would point the user at the
@@ -359,14 +325,7 @@ export function useProviderActions(
         // 错误提示由 mutation 处理
       }
     },
-    [
-      switchProviderMutation,
-      syncClaudePlugin,
-      activeApp,
-      isProxyRunning,
-      isProxyTakeover,
-      t,
-    ],
+    [switchProviderMutation, activeApp, isProxyRunning, isProxyTakeover, t],
   );
 
   // 删除供应商

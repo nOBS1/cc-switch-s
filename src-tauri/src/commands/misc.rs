@@ -1,11 +1,13 @@
 #![allow(non_snake_case)]
 
 use crate::app_config::AppType;
+use crate::fork_policy::ensure_app_management_allowed;
 use crate::init_status::{InitErrorPayload, SkillsMigrationPayload};
 use crate::services::ProviderService;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tauri::AppHandle;
@@ -126,6 +128,157 @@ const VALID_TOOLS: [&str; 9] = [
 const COMETIX_CLAUDE_TOOL: &str = "claude-cometix";
 const COMETIX_CLAUDE_PACKAGE: &str = "@cometix/claude-code";
 const COMETIX_CLAUDE_REPO: &str = "CometixSpace/claude-code";
+
+fn ensure_cometix_runtime_preflight_for_distro(wsl_distro: Option<&str>) -> Result<(), String> {
+    ensure_app_management_allowed(&AppType::ClaudeCometix).map_err(|error| error.to_string())?;
+    crate::fork_policy::ensure_cometix_config_tree_isolated().map_err(|error| error.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    if let Some(distro) = wsl_distro {
+        return ensure_wsl_cometix_install_paths_isolated(distro);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = wsl_distro;
+
+    ensure_cometix_install_paths_isolated_at(&crate::config::get_home_dir())
+}
+
+/// Re-check every filesystem tree that a configured `hlclaude` process can
+/// mutate. Keep this at the final process-launch boundary: settings and links
+/// may have changed since the UI first rendered the action.
+pub(crate) fn ensure_cometix_runtime_preflight() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let distro = wsl_distro_for_tool(COMETIX_CLAUDE_TOOL);
+        ensure_cometix_runtime_preflight_for_distro(distro.as_deref())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    ensure_cometix_runtime_preflight_for_distro(None)
+}
+
+fn ensure_cometix_native_runtime_preflight() -> Result<(), String> {
+    ensure_cometix_runtime_preflight_for_distro(None)
+}
+
+fn tool_runtime_preflight(tool: &str) -> Result<(), String> {
+    if tool == COMETIX_CLAUDE_TOOL {
+        ensure_cometix_runtime_preflight()?;
+    }
+    Ok(())
+}
+
+fn run_after_tool_runtime_preflight_with<T, G, O>(
+    tool: &str,
+    guard: G,
+    operation: O,
+) -> Result<T, String>
+where
+    G: FnOnce() -> Result<(), String>,
+    O: FnOnce() -> T,
+{
+    if tool == COMETIX_CLAUDE_TOOL {
+        guard()?;
+    }
+    Ok(operation())
+}
+
+fn run_after_tool_runtime_preflight<T, O>(tool: &str, operation: O) -> Result<T, String>
+where
+    O: FnOnce() -> T,
+{
+    run_after_tool_runtime_preflight_with(tool, ensure_cometix_runtime_preflight, operation)
+}
+
+fn private_runtime_temp_dir() -> Result<PathBuf, String> {
+    let root = crate::config::get_app_config_dir();
+    crate::app_store::ensure_private_app_data_path_isolated(&root)
+        .map_err(|error| error.to_string())?;
+    let directory = root.join("tmp");
+    crate::app_store::ensure_private_app_data_path_isolated(&directory)
+        .map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("创建私有临时目录失败: {error}"))?;
+    // Re-check the materialized directory so a pre-existing junction or
+    // symlink can never turn the subsequent exclusive create into a write to
+    // official Claude/Desktop or the upstream CC Switch data tree.
+    crate::app_store::ensure_private_app_data_path_isolated(&directory)
+        .map_err(|error| error.to_string())?;
+    Ok(directory)
+}
+
+fn sanitized_temp_label(label: &str) -> String {
+    let value = label
+        .chars()
+        .take(48)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if value.is_empty() {
+        "runtime".to_string()
+    } else {
+        value
+    }
+}
+
+fn create_private_temp_file(label: &str, suffix: &str) -> Result<tempfile::NamedTempFile, String> {
+    let directory = private_runtime_temp_dir()?;
+    let prefix = format!("cc-switch-{}-", sanitized_temp_label(label));
+    let file = tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(suffix)
+        .tempfile_in(&directory)
+        .map_err(|error| format!("创建私有临时文件失败: {error}"))?;
+    crate::app_store::ensure_private_app_data_path_isolated(file.path())
+        .map_err(|error| error.to_string())?;
+    Ok(file)
+}
+
+fn write_private_temp_handle(
+    file: &mut tempfile::NamedTempFile,
+    contents: &[u8],
+) -> Result<(), String> {
+    file.as_file_mut()
+        .write_all(contents)
+        .map_err(|error| format!("写入私有临时文件失败: {error}"))?;
+    file.as_file_mut()
+        .flush()
+        .map_err(|error| format!("刷新私有临时文件失败: {error}"))
+}
+
+fn persist_private_temp_file_with<F>(
+    label: &str,
+    suffix: &str,
+    executable: bool,
+    build_contents: F,
+) -> Result<PathBuf, String>
+where
+    F: FnOnce(&Path) -> Result<Vec<u8>, String>,
+{
+    let mut file = create_private_temp_file(label, suffix)?;
+    let contents = build_contents(file.path())?;
+    write_private_temp_handle(&mut file, &contents)?;
+
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("设置私有临时脚本权限失败: {error}"))?;
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
+
+    file.into_temp_path()
+        .keep()
+        .map_err(|error| format!("保留私有临时文件失败: {error}"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaudeLatestVersionSource {
@@ -251,6 +404,7 @@ pub async fn run_tool_lifecycle_action(
     if requested.is_empty() {
         return Err("No supported tools selected".to_string());
     }
+    ensure_tool_lifecycle_management_allowed(&requested)?;
 
     let label = match action {
         ToolLifecycleAction::Install => "tool_install",
@@ -267,14 +421,29 @@ pub async fn run_tool_lifecycle_action(
         #[cfg(not(target_os = "windows"))]
         let ensure_native_cometix_launcher = includes_cometix;
 
+        if includes_cometix {
+            ensure_cometix_runtime_preflight()?;
+        }
         let command_line =
             build_tool_lifecycle_command(&requested, action, wsl_shell_by_tool.as_ref())?;
+        // Update planning may itself execute `hlclaude --version` to anchor
+        // the package manager. Re-check immediately before npm is allowed to
+        // mutate the selected installation prefix.
+        if includes_cometix {
+            ensure_cometix_runtime_preflight()?;
+        }
         run_tool_lifecycle_silently(&command_line, label)?;
+        if includes_cometix {
+            ensure_cometix_runtime_preflight()?;
+        }
         if ensure_native_cometix_launcher {
             ensure_cometix_launcher_at(
                 &crate::config::get_home_dir(),
                 &crate::config::get_claude_cometix_config_dir(),
             )?;
+        }
+        if includes_cometix {
+            ensure_cometix_runtime_preflight()?;
         }
         Ok(())
     })
@@ -311,16 +480,14 @@ fn run_tool_lifecycle_silently(command_line: &str, label: &str) -> Result<(), St
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
-    let bat_file =
-        std::env::temp_dir().join(format!("cc_switch_{}_{}.bat", label, std::process::id()));
-    std::fs::write(&bat_file, command_line).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+    let mut bat_file = create_private_temp_file(label, ".bat")?;
+    write_private_temp_handle(&mut bat_file, command_line.as_bytes())?;
 
     let output = Command::new("cmd")
         .arg("/C")
-        .arg(&bat_file)
+        .arg(bat_file.path())
         .creation_flags(CREATE_NO_WINDOW)
         .output();
-    let _ = std::fs::remove_file(&bat_file);
 
     finish_lifecycle_output(&output.map_err(|e| format!("启动安装进程失败: {e}"))?)
 }
@@ -435,6 +602,114 @@ fn normalize_requested_tools(tools: &[String]) -> Vec<&'static str> {
         .copied()
         .filter(|tool| set.contains(tool))
         .collect()
+}
+
+fn ensure_tool_lifecycle_management_allowed(tools: &[&str]) -> Result<(), String> {
+    if tools.contains(&"claude") {
+        ensure_app_management_allowed(&AppType::Claude).map_err(|error| error.to_string())?;
+    }
+    if tools.contains(&COMETIX_CLAUDE_TOOL) {
+        ensure_cometix_runtime_preflight()?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_wsl_cometix_install_paths_isolated(distro: &str) -> Result<(), String> {
+    let home = crate::fork_policy::resolve_wsl_home_for_distro(distro)
+        .map_err(|error| error.to_string())?;
+    ensure_cometix_install_paths_isolated_at(&home)
+}
+
+fn ensure_cometix_install_paths_isolated_at(home: &Path) -> Result<(), String> {
+    let local_root = home.join(".local");
+    let bin_root = local_root.join("bin");
+    let install_prefix = local_root.join("share").join("hlclaude");
+    let launcher = bin_root.join(if cfg!(windows) {
+        "hlclaude.cmd"
+    } else {
+        "hlclaude"
+    });
+    let managed_paths = [
+        local_root.clone(),
+        bin_root.clone(),
+        launcher.clone(),
+        install_prefix.clone(),
+    ];
+    #[cfg(target_os = "windows")]
+    let wsl_distro = crate::fork_policy::wsl_distro_from_unc_path(home);
+    #[cfg(not(target_os = "windows"))]
+    let wsl_distro: Option<String> = None;
+    let desktop_roots = match crate::claude_desktop_config::get_protected_config_roots() {
+        Ok(roots) => roots,
+        Err(error) if wsl_distro.is_some() => return Err(error.to_string()),
+        Err(_) => Vec::new(),
+    };
+    let mut protected_roots = crate::fork_policy::cometix_protected_roots_with_wsl_home(
+        &crate::config::get_home_dir(),
+        &crate::config::get_claude_config_dir(),
+        wsl_distro.as_ref().map(|_| home),
+        desktop_roots,
+    );
+    protected_roots.push(crate::config::get_claude_cometix_config_dir());
+
+    for path in managed_paths {
+        if !crate::app_store::path_is_same_or_nested(&path, &local_root)
+            || protected_roots
+                .iter()
+                .any(|protected| crate::app_store::paths_overlap(&path, protected))
+        {
+            return Err(
+                "Claude Code（Cometix）安装路径指向了官方 Claude 或 CC Switch 数据，已拒绝覆盖"
+                    .to_string(),
+            );
+        }
+    }
+
+    for tree_root in [&bin_root, &install_prefix] {
+        if tree_root.exists() {
+            crate::fork_policy::ensure_cometix_tree_with_roots(
+                tree_root,
+                tree_root,
+                &protected_roots,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Some(distro) = wsl_distro.as_deref() {
+        // Validate in the Linux distro as well. Windows UNC/ReparsePoint APIs
+        // cannot reliably resolve WSL symlinks, while npm will follow them.
+        for tree_root in [&bin_root, &install_prefix] {
+            crate::fork_policy::ensure_wsl_tree_isolated(
+                distro,
+                tree_root,
+                &protected_roots,
+                false,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+
+    let official_files = [
+        home.join(".claude.json"),
+        home.join(".claude").join("settings.json"),
+        home.join(".claude").join("CLAUDE.md"),
+        home.join(".cc-switch").join("cc-switch.db"),
+    ];
+    if official_files
+        .iter()
+        .any(|official| crate::app_store::same_existing_file_identity(&launcher, official))
+    {
+        return Err(
+            "Claude Code（Cometix）启动器与官方 Claude 或 CC Switch 文件共用了同一文件，已拒绝覆盖"
+                .to_string(),
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -591,9 +866,7 @@ fn cometix_posix_launcher_content(config_dir: &Path) -> String {
     format!(
         r#"#!/usr/bin/env sh
 # {COMETIX_LAUNCHER_MARKER}
-if [ -z "${{CLAUDE_CONFIG_DIR:-}}" ]; then
-  CLAUDE_CONFIG_DIR={config_dir}
-fi
+CLAUDE_CONFIG_DIR={config_dir}
 export CLAUDE_CONFIG_DIR
 export DISABLE_AUTOUPDATER=1
 exec node "${{HOME}}/.local/share/hlclaude/node_modules/@cometix/claude-code/cli.js" "$@"
@@ -607,7 +880,7 @@ fn cometix_windows_launcher_content(config_dir: &Path) -> String {
         r#"@echo off
 rem {COMETIX_LAUNCHER_MARKER}
 setlocal DisableDelayedExpansion
-if not defined CLAUDE_CONFIG_DIR set "CLAUDE_CONFIG_DIR={config_dir}"
+set "CLAUDE_CONFIG_DIR={config_dir}"
 set "DISABLE_AUTOUPDATER=1"
 node "%USERPROFILE%\.local\share\hlclaude\node_modules\@cometix\claude-code\cli.js" %*
 set "HLCLAUDE_EXIT_CODE=%ERRORLEVEL%"
@@ -687,6 +960,15 @@ fn cometix_npm_install_command(shell: LifecycleCommandShell) -> String {
 }
 
 fn ensure_cometix_launcher_at(home: &Path, config_dir: &Path) -> Result<(), String> {
+    ensure_cometix_install_paths_isolated_at(home)?;
+    if [home.join(".claude"), home.join(".cc-switch")]
+        .iter()
+        .any(|protected| crate::app_store::paths_overlap(config_dir, protected))
+    {
+        return Err(
+            "Claude Code（Cometix）配置目录与官方 Claude 或 CC Switch 数据重合".to_string(),
+        );
+    }
     let bin_dir = home.join(".local").join("bin");
     std::fs::create_dir_all(&bin_dir).map_err(|e| format!("创建 hlclaude 启动目录失败: {e}"))?;
     std::fs::create_dir_all(config_dir).map_err(|e| format!("创建 hlclaude 配置目录失败: {e}"))?;
@@ -860,7 +1142,7 @@ fn build_tool_action_line(
         //    逐工具触发 lifecycle,batch 化会破坏"逐工具独立成败"的 UX。
         let command = match action {
             ToolLifecycleAction::Update => {
-                let installs = enumerate_tool_installations(tool);
+                let installs = enumerate_tool_installations(tool)?;
                 installs_anchored_command(tool, &installs)
                     .unwrap_or_else(|| static_fallback_command(tool))
             }
@@ -887,7 +1169,7 @@ fn build_tool_action_line(
         // （有 native installer 的工具如 claude/opencode/hermes），其余仍裸 npm。
         let command = match action {
             ToolLifecycleAction::Update => {
-                let installs = enumerate_tool_installations(tool);
+                let installs = enumerate_tool_installations(tool)?;
                 installs_anchored_command(tool, &installs)
                     .unwrap_or_else(|| static_fallback_command(tool))
             }
@@ -1249,6 +1531,12 @@ enum ShellProbe {
     NotFound(String),
 }
 
+fn runtime_preflight_probe_failure(tool: &str) -> Option<ShellProbe> {
+    tool_runtime_preflight(tool)
+        .err()
+        .map(ShellProbe::FoundButFailed)
+}
+
 /// 在非 Windows 平台用用户 shell 执行 `{tool} --version` 探测版本。
 ///
 /// Windows 不走此路径：`cmd /C {tool}` 可能误触发 App Execution Alias /
@@ -1257,6 +1545,10 @@ enum ShellProbe {
 #[cfg(not(target_os = "windows"))]
 fn try_get_version(tool: &str) -> ShellProbe {
     use std::process::Command;
+
+    if let Some(failure) = runtime_preflight_probe_failure(tool) {
+        return failure;
+    }
 
     let output = {
         let shell = std::env::var("SHELL")
@@ -1504,6 +1796,11 @@ fn try_get_version_wsl(
     // 校验 distro 名称，防止命令注入
     if !is_valid_wsl_distro_name(distro) {
         return ShellProbe::NotFound(format!("[WSL:{distro}] invalid distro name"));
+    }
+    if tool == COMETIX_CLAUDE_TOOL {
+        if let Err(error) = ensure_cometix_runtime_preflight_for_distro(Some(distro)) {
+            return ShellProbe::FoundButFailed(error);
+        }
     }
 
     // 构建 Shell 脚本检测逻辑。Cometix 与官方版共用 `claude` 命令，脚本内会先
@@ -2350,6 +2647,9 @@ fn probe_path_default_version(tool: &str) -> ShellProbe {
     if !tool_installation_matches(tool, &path_default, &real) {
         return ShellProbe::NotFound(NOT_INSTALLED.to_string());
     }
+    if let Some(failure) = runtime_preflight_probe_failure(tool) {
+        return failure;
+    }
     let current_path = effective_path_string();
     match run_windows_tool_version_command(&path_default, &current_path) {
         Ok(out) => {
@@ -2385,6 +2685,10 @@ fn scan_cli_version(tool: &str) -> ShellProbe {
     let current_path = effective_path_string();
     #[cfg(not(target_os = "windows"))]
     let current_path = effective_path_os().unwrap_or_default();
+
+    if let Some(failure) = runtime_preflight_probe_failure(tool) {
+        return failure;
+    }
 
     // 记录"可执行文件存在、但 `--version` 非零退出"时的首个诊断信息。
     // 典型场景：工具已安装但当前环境跑不起来（如 openclaw 要求 Node v22.19+）。
@@ -2744,7 +3048,21 @@ fn run_probe_version_command(
 /// 枚举工具在系统中的所有安装（不短路）。与 `scan_cli_version` 共用
 /// `build_tool_search_paths`，但不在首个命中处停止——而是对每个去重后的真实
 /// 可执行文件都跑一次 `--version`，从而能发现"升级写入 A 处、PATH 实际用 B 处"。
-fn enumerate_tool_installations(tool: &str) -> Vec<ToolInstallation> {
+fn enumerate_tool_installations(tool: &str) -> Result<Vec<ToolInstallation>, String> {
+    #[cfg(target_os = "windows")]
+    if tool == COMETIX_CLAUDE_TOOL && wsl_distro_for_tool(tool).is_some() {
+        // The native enumerator below only walks Windows host candidates. A
+        // WSL-bound Cometix entry must never validate the distro and then run a
+        // different host-side `hlclaude`; its in-distro version is already
+        // reported by `try_get_version_wsl`.
+        ensure_cometix_runtime_preflight()?;
+        return Ok(Vec::new());
+    }
+
+    run_after_tool_runtime_preflight(tool, || enumerate_tool_installations_unchecked(tool))
+}
+
+fn enumerate_tool_installations_unchecked(tool: &str) -> Vec<ToolInstallation> {
     let search_paths = build_tool_search_paths(tool);
     #[cfg(target_os = "windows")]
     let current_path = effective_path_string();
@@ -3622,6 +3940,7 @@ pub(crate) fn run_detected_tool_command_with_timeout(
     }) {
         return Err("Invalid tool command arguments".to_string());
     }
+    tool_runtime_preflight(tool)?;
 
     let deadline = CommandDeadline::from_timeout(timeout);
 
@@ -3833,6 +4152,9 @@ fn run_wsl_tool_command(
     if !is_valid_wsl_distro_name(distro) {
         return Err(format!("[WSL:{distro}] invalid distro name"));
     }
+    if tool == COMETIX_CLAUDE_TOOL {
+        ensure_cometix_runtime_preflight_for_distro(Some(distro))?;
+    }
 
     let command = build_wsl_tool_command(tool, args, deadline)?;
     let linux_working_dir = wsl_unc_path_to_linux(working_dir)
@@ -4039,23 +4361,23 @@ pub async fn probe_tool_installations(
     tokio::task::spawn_blocking(move || {
         requested
             .into_iter()
-            .map(|tool| {
-                let installs = enumerate_tool_installations(tool);
+            .map(|tool| -> Result<ToolInstallationReport, String> {
+                let installs = enumerate_tool_installations(tool)?;
                 let (command, needs_confirmation, anchored) = plan_command_for(tool, &installs);
                 let is_conflict = is_conflicting(&installs);
-                ToolInstallationReport {
+                Ok(ToolInstallationReport {
                     tool: tool.to_string(),
                     installs,
                     is_conflict,
                     needs_confirmation,
                     command,
                     anchored,
-                }
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
     })
     .await
-    .map_err(|e| format!("probe task join error: {e}"))
+    .map_err(|e| format!("probe task join error: {e}"))?
 }
 
 #[cfg(target_os = "windows")]
@@ -4080,25 +4402,7 @@ fn wsl_distro_for_tool(tool: &str) -> Option<String> {
 /// 支持 `\\wsl$\Ubuntu\...` 和 `\\wsl.localhost\Ubuntu\...` 两种格式
 #[cfg(target_os = "windows")]
 fn wsl_distro_from_path(path: &Path) -> Option<String> {
-    use std::path::{Component, Prefix};
-    let Some(Component::Prefix(prefix)) = path.components().next() else {
-        return None;
-    };
-    match prefix.kind() {
-        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
-            let server_name = server.to_string_lossy();
-            if server_name.eq_ignore_ascii_case("wsl$")
-                || server_name.eq_ignore_ascii_case("wsl.localhost")
-            {
-                let distro = share.to_string_lossy().to_string();
-                if !distro.is_empty() {
-                    return Some(distro);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
+    crate::fork_policy::wsl_distro_from_unc_path(path)
 }
 
 /// 打开指定提供商的终端
@@ -4120,7 +4424,7 @@ pub async fn open_provider_terminal(
     #[allow(non_snake_case)] providerId: String,
     cwd: Option<String>,
 ) -> Result<bool, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let app_type = require_provider_terminal_app(&app)?;
     let launch_cwd = resolve_launch_cwd(cwd)?;
 
     // 获取提供商配置
@@ -4135,16 +4439,24 @@ pub async fn open_provider_terminal(
     let config = &provider.settings_config;
     let env_vars = extract_env_vars_from_config(config, &app_type);
 
-    // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
+    // 根据平台启动终端。临时配置与启动器在私有应用目录中随机独占创建。
     launch_terminal_with_env(
         env_vars,
-        &providerId,
         launch_cwd.as_deref(),
         provider_cli_executable(&app_type),
     )
     .map_err(|e| format!("启动终端失败: {e}"))?;
 
     Ok(true)
+}
+
+fn require_provider_terminal_app(app: &str) -> Result<AppType, String> {
+    let app_type = AppType::from_str(app).map_err(|e| e.to_string())?;
+    ensure_app_management_allowed(&app_type).map_err(|e| e.to_string())?;
+    if matches!(app_type, AppType::ClaudeCometix) {
+        crate::fork_policy::ensure_cometix_config_tree_isolated().map_err(|e| e.to_string())?;
+    }
+    Ok(app_type)
 }
 
 /// 从提供商配置中提取环境变量
@@ -4247,47 +4559,51 @@ fn resolve_launch_cwd(cwd: Option<String>) -> Result<Option<PathBuf>, String> {
 /// 使用 --settings 参数传入提供商特定的 API 配置
 fn launch_terminal_with_env(
     env_vars: Vec<(String, String)>,
-    provider_id: &str,
     cwd: Option<&Path>,
     executable: &str,
 ) -> Result<(), String> {
-    let temp_dir = std::env::temp_dir();
-    let config_file = temp_dir.join(format!(
-        "claude_{}_{}.json",
-        provider_id,
-        std::process::id()
-    ));
+    // Provider terminals always execute the host/native launcher, even when a
+    // WSL override is configured for the version card. Validate the exact
+    // install tree that will be launched, immediately before creating any
+    // launch artifact.
+    if executable == "hlclaude" {
+        ensure_cometix_native_runtime_preflight()?;
+    }
 
-    // 创建并写入配置文件
-    write_claude_config(&config_file, &env_vars)?;
+    let config_json = claude_config_json(&env_vars)?;
+    let config_file =
+        persist_private_temp_file_with("provider-config", ".json", false, |_| Ok(config_json))?;
+
+    // Re-check at the last in-process boundary as well: the configured paths
+    // may have changed while the launch artifacts were being materialized.
+    if executable == "hlclaude" {
+        if let Err(error) = ensure_cometix_native_runtime_preflight() {
+            let _ = std::fs::remove_file(&config_file);
+            return Err(error);
+        }
+    }
 
     #[cfg(target_os = "macos")]
-    {
-        launch_macos_terminal(&config_file, cwd, executable)?;
-        Ok(())
-    }
+    let launch_result = launch_macos_terminal(&config_file, cwd, executable);
 
     #[cfg(target_os = "linux")]
-    {
-        launch_linux_terminal(&config_file, cwd, executable)?;
-        Ok(())
-    }
+    let launch_result = launch_linux_terminal(&config_file, cwd, executable);
 
     #[cfg(target_os = "windows")]
-    {
-        launch_windows_terminal(&temp_dir, &config_file, cwd, executable)?;
-        Ok(())
-    }
+    let launch_result = launch_windows_terminal(&config_file, cwd, executable);
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    Err("不支持的操作系统".to_string())
+    let launch_result = Err("不支持的操作系统".to_string());
+
+    if launch_result.is_err() {
+        let _ = std::fs::remove_file(&config_file);
+    }
+    launch_result
 }
 
-/// 写入 claude 配置文件
-fn write_claude_config(
-    config_file: &std::path::Path,
-    env_vars: &[(String, String)],
-) -> Result<(), String> {
+/// Serialize a provider-specific Claude settings file. The caller writes the
+/// returned bytes through an already-open, exclusively-created private handle.
+fn claude_config_json(env_vars: &[(String, String)]) -> Result<Vec<u8>, String> {
     let mut config_obj = serde_json::Map::new();
     let mut env_obj = serde_json::Map::new();
 
@@ -4297,10 +4613,34 @@ fn write_claude_config(
 
     config_obj.insert("env".to_string(), serde_json::Value::Object(env_obj));
 
-    let config_json =
-        serde_json::to_string_pretty(&config_obj).map_err(|e| format!("序列化配置失败: {e}"))?;
+    serde_json::to_vec_pretty(&config_obj).map_err(|e| format!("序列化配置失败: {e}"))
+}
 
-    std::fs::write(config_file, config_json).map_err(|e| format!("写入配置文件失败: {e}"))
+/// macOS: 根据用户首选终端启动
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn build_provider_posix_launcher_script(
+    script_file: &Path,
+    config_file: &Path,
+    provider_command: &str,
+    final_cd_command: &str,
+    exec_line: &str,
+) -> String {
+    let quoted_config = shell_single_quote(&config_file.to_string_lossy());
+    let quoted_script = shell_single_quote(&script_file.to_string_lossy());
+    format!(
+        r#"#!/usr/bin/env sh
+cleanup() {{
+  rm -f -- {quoted_config} {quoted_script}
+}}
+trap cleanup EXIT HUP INT TERM
+printf '%s\n' "Using provider-specific claude config:"
+printf '%s\n' {quoted_config}
+{provider_command}
+cleanup
+{final_cd_command}
+{exec_line}
+"#,
+    )
 }
 
 /// macOS: 根据用户首选终端启动
@@ -4310,8 +4650,6 @@ fn launch_macos_terminal(
     cwd: Option<&Path>,
     executable: &str,
 ) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-
     let preferred = crate::settings::get_preferred_terminal();
     let terminal = preferred.as_deref().unwrap_or("terminal");
 
@@ -4319,34 +4657,19 @@ fn launch_macos_terminal(
     let exec_line = build_exec_line(&shell, cwd);
     let final_cd_command = build_final_shell_cd_command(&shell, cwd);
 
-    let temp_dir = std::env::temp_dir();
-    let script_file = temp_dir.join(format!("cc_switch_launcher_{}.sh", std::process::id()));
-    let config_path = config_file.to_string_lossy();
+    let config_path = config_file.to_string_lossy().into_owned();
     let provider_command = build_provider_command_line(&shell, executable, &config_path, cwd);
-
-    // Write the shell script to a temp file
-    // 脚本使用 POSIX sh 语法确保可移植性，exec 行切换到用户交互式 shell
-    let script_content = format!(
-        r#"#!/usr/bin/env sh
-trap 'rm -f "{config_path}" "{script_file}"' EXIT
-echo "Using provider-specific claude config:"
-echo "{config_path}"
-{provider_command}
-{final_cd_command}
-{exec_line}
-"#,
-        config_path = config_path,
-        script_file = script_file.display(),
-        provider_command = provider_command,
-        final_cd_command = final_cd_command,
-        exec_line = exec_line,
-    );
-
-    std::fs::write(&script_file, &script_content).map_err(|e| format!("写入启动脚本失败: {e}"))?;
-
-    // Make script executable
-    std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+    let script_file =
+        persist_private_temp_file_with("provider-launcher", ".sh", true, |script_file| {
+            Ok(build_provider_posix_launcher_script(
+                script_file,
+                config_file,
+                &provider_command,
+                &final_cd_command,
+                &exec_line,
+            )
+            .into_bytes())
+        })?;
 
     // Try the preferred terminal first, fall back to Terminal.app if it fails
     // Note: Kitty doesn't need the -e flag, others do
@@ -4363,16 +4686,21 @@ echo "{config_path}"
     };
 
     // If preferred terminal fails and it's not the default, try Terminal.app as fallback
-    if result.is_err() && terminal != "terminal" {
+    let final_result = if result.is_err() && terminal != "terminal" {
         log::warn!(
             "首选终端 {} 启动失败，回退到 Terminal.app: {:?}",
             terminal,
             result.as_ref().err()
         );
-        return launch_macos_terminal_app(&script_file);
-    }
+        launch_macos_terminal_app(&script_file)
+    } else {
+        result
+    };
 
-    result
+    if final_result.is_err() {
+        let _ = std::fs::remove_file(&script_file);
+    }
+    final_result
 }
 
 /// Escape a value as an AppleScript string literal.
@@ -4650,8 +4978,6 @@ fn launch_macos_open_app(
 
 #[cfg(target_os = "macos")]
 fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     let mut cmd = Command::new("open");
@@ -4661,33 +4987,33 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
     //
     // 1. script_file's name ends up with .sh, so Warp would open the file rather than execute it
     // 2. script_file has no execution permission, so we need to add one more indirection
-    let mut second_script_file = tempfile::Builder::new()
-        .disable_cleanup(true)
-        .permissions(std::fs::Permissions::from_mode(0o755))
-        .tempfile()
-        .map_err(|e| format!("Failed to create temporary script file: {e}"))?;
-
-    writeln!(
-        &mut second_script_file,
-        r#"#!/usr/bin/env sh
-
-        rm -- "$0"
-
-        exec sh {quoted_script}
-        "#,
-        quoted_script = shell_single_quote(&script_file.to_string_lossy()),
-    )
-    .map_err(|e| format!("Failed to write to temporary script file for Warp: {e}"))?;
+    let second_script_file = persist_private_temp_file_with("warp-launcher", ".sh", true, |_| {
+        Ok(format!(
+            r#"#!/usr/bin/env sh
+rm -f -- "$0"
+exec sh {quoted_script}
+"#,
+            quoted_script = shell_single_quote(&script_file.to_string_lossy()),
+        )
+        .into_bytes())
+    })?;
 
     let mut warp_url = url::Url::parse("warp://action/new_tab").unwrap();
     warp_url
         .query_pairs_mut()
-        .append_pair("path", &second_script_file.path().to_string_lossy());
+        .append_pair("path", &second_script_file.to_string_lossy());
     let warp_url = warp_url.to_string();
     cmd.arg(warp_url);
 
-    let output = cmd.output().map_err(|e| format!("启动 Warp 失败: {e}"))?;
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_file(&second_script_file);
+            return Err(format!("启动 Warp 失败: {error}"));
+        }
+    };
     if !output.status.success() {
+        let _ = std::fs::remove_file(&second_script_file);
         let stderr = decode_command_output(&output.stderr);
         return Err(format!(
             "Warp 启动失败 (exit code: {:?}): {}",
@@ -4706,7 +5032,6 @@ fn launch_linux_terminal(
     cwd: Option<&Path>,
     executable: &str,
 ) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     let preferred = crate::settings::get_preferred_terminal();
@@ -4727,32 +5052,19 @@ fn launch_linux_terminal(
         ("ghostty", vec!["-e"]),
     ];
 
-    // Create temp script file
-    let temp_dir = std::env::temp_dir();
-    let script_file = temp_dir.join(format!("cc_switch_launcher_{}.sh", std::process::id()));
-    let config_path = config_file.to_string_lossy();
+    let config_path = config_file.to_string_lossy().into_owned();
     let provider_command = build_provider_command_line(&shell, executable, &config_path, cwd);
-
-    let script_content = format!(
-        r#"#!/usr/bin/env sh
-trap 'rm -f "{config_path}" "{script_file}"' EXIT
-echo "Using provider-specific claude config:"
-echo "{config_path}"
-{provider_command}
-{final_cd_command}
-{exec_line}
-"#,
-        config_path = config_path,
-        script_file = script_file.display(),
-        provider_command = provider_command,
-        final_cd_command = final_cd_command,
-        exec_line = exec_line,
-    );
-
-    std::fs::write(&script_file, &script_content).map_err(|e| format!("写入启动脚本失败: {e}"))?;
-
-    std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+    let script_file =
+        persist_private_temp_file_with("provider-launcher", ".sh", true, |script_file| {
+            Ok(build_provider_posix_launcher_script(
+                script_file,
+                config_file,
+                &provider_command,
+                &final_cd_command,
+                &exec_line,
+            )
+            .into_bytes())
+        })?;
 
     // Build terminal list: preferred terminal first (if specified), then defaults
     let terminals_to_try: Vec<(&str, Vec<&str>)> = if let Some(ref pref) = preferred {
@@ -4805,7 +5117,6 @@ echo "{config_path}"
 
     // Clean up on failure
     let _ = std::fs::remove_file(&script_file);
-    let _ = std::fs::remove_file(config_file);
     Err(last_error)
 }
 
@@ -4885,7 +5196,6 @@ del \"%~f0\" >nul 2>&1
 /// Windows: 根据用户首选终端启动
 #[cfg(target_os = "windows")]
 fn launch_windows_terminal(
-    temp_dir: &std::path::Path,
     config_file: &std::path::Path,
     cwd: Option<&Path>,
     executable: &str,
@@ -4893,10 +5203,10 @@ fn launch_windows_terminal(
     let preferred = crate::settings::get_preferred_terminal();
     let terminal = preferred.as_deref().unwrap_or("cmd");
 
-    let bat_file = temp_dir.join(format!("cc_switch_claude_{}.bat", std::process::id()));
     let content = build_windows_provider_batch(executable, config_file, cwd);
-
-    std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+    let bat_file = persist_private_temp_file_with("provider-launcher", ".bat", false, |_| {
+        Ok(content.into_bytes())
+    })?;
 
     let bat_path = bat_file.to_string_lossy();
     let ps_cmd = format!("& '{}'", bat_path);
@@ -4912,16 +5222,21 @@ fn launch_windows_terminal(
     };
 
     // If preferred terminal fails and it's not the default, try cmd as fallback
-    if result.is_err() && terminal != "cmd" {
+    let final_result = if result.is_err() && terminal != "cmd" {
         log::warn!(
             "首选终端 {} 启动失败，回退到 cmd: {:?}",
             terminal,
             result.as_ref().err()
         );
-        return run_windows_start_command(&["cmd", "/K", &bat_path], "cmd");
-    }
+        run_windows_start_command(&["cmd", "/K", &bat_path], "cmd")
+    } else {
+        result
+    };
 
-    result
+    if final_result.is_err() {
+        let _ = std::fs::remove_file(&bat_file);
+    }
+    final_result
 }
 
 #[cfg_attr(windows, allow(dead_code))]
@@ -4998,15 +5313,14 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
 /// **Security**：`command_line` 会被原样拼进 shell/batch 脚本，调用方必须
 /// 保证它是可信字符串（当前只由后端硬编码调用）。
 pub(crate) fn launch_terminal_running(command_line: &str, label: &str) -> Result<(), String> {
-    let temp_dir = std::env::temp_dir();
-    let pid = std::process::id();
-
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let (script_file, script_content) = {
-        let file = temp_dir.join(format!("cc_switch_{}_{}.sh", label, pid));
-        let content = format!(
+    let script_file = persist_private_temp_file_with(label, ".sh", true, |script_file| {
+        Ok(format!(
             r#"#!/usr/bin/env sh
-trap 'rm -f "{script_path}"' EXIT
+cleanup() {{
+  rm -f -- {script_path}
+}}
+trap cleanup EXIT HUP INT TERM
 echo "[cc-switch] Starting: {label}"
 echo ""
 {cmd}
@@ -5014,22 +5328,15 @@ echo ""
 echo "[cc-switch] Command exited. Press Enter to close."
 read -r _
 "#,
-            script_path = file.display(),
+            script_path = shell_single_quote(&script_file.to_string_lossy()),
             label = label,
             cmd = command_line,
-        );
-        (file, content)
-    };
+        )
+        .into_bytes())
+    })?;
 
     #[cfg(target_os = "macos")]
     {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
-        std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
-
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("terminal");
 
@@ -5045,26 +5352,25 @@ read -r _
             _ => launch_macos_terminal_app(&script_file),
         };
 
-        if result.is_err() && terminal != "terminal" {
+        let final_result = if result.is_err() && terminal != "terminal" {
             log::warn!(
                 "首选终端 {} 启动失败，回退到 Terminal.app: {:?}",
                 terminal,
                 result.as_ref().err()
             );
-            return launch_macos_terminal_app(&script_file);
+            launch_macos_terminal_app(&script_file)
+        } else {
+            result
+        };
+        if final_result.is_err() {
+            let _ = std::fs::remove_file(&script_file);
         }
-        result
+        final_result
     }
 
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
-
-        std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
-        std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
 
         let preferred = crate::settings::get_preferred_terminal();
         let default_terminals = [
@@ -5130,13 +5436,13 @@ read -r _
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("cmd");
 
-        let bat_file = temp_dir.join(format!("cc_switch_{}_{}.bat", label, pid));
         let content = format!(
             "@echo off\r\necho [cc-switch] Starting: {label}\r\necho.\r\n{cmd}\r\necho.\r\necho [cc-switch] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
             label = label,
             cmd = command_line,
         );
-        std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+        let bat_file =
+            persist_private_temp_file_with(label, ".bat", false, |_| Ok(content.into_bytes()))?;
 
         let bat_path = bat_file.to_string_lossy();
         let ps_cmd = format!("& '{}'", bat_path);
@@ -5172,7 +5478,7 @@ read -r _
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = (temp_dir, pid, command_line, label);
+        let _ = (command_line, label);
         Err("不支持的操作系统".to_string())
     }
 }
@@ -5196,6 +5502,285 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    struct ReloadedTestHome(Option<std::ffi::OsString>);
+
+    impl ReloadedTestHome {
+        fn set(home: &Path) -> Self {
+            let guard = Self(std::env::var_os("CC_SWITCH_TEST_HOME"));
+            std::env::set_var("CC_SWITCH_TEST_HOME", home);
+            crate::settings::reload_settings().expect("reload isolated settings");
+            guard
+        }
+    }
+
+    impl Drop for ReloadedTestHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = crate::settings::reload_settings();
+        }
+    }
+
+    #[cfg(unix)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        std::os::unix::fs::symlink(source, destination).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(source, destination).is_ok() {
+            return true;
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(destination)
+            .arg(source)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn cometix_runtime_preflight_failure_prevents_operation() {
+        let operation_ran = std::cell::Cell::new(false);
+        let result = run_after_tool_runtime_preflight_with(
+            COMETIX_CLAUDE_TOOL,
+            || Err("isolated test guard rejected the target".to_string()),
+            || operation_ran.set(true),
+        );
+
+        assert!(result.is_err());
+        assert!(!operation_ran.get(), "guard failure must suppress hlclaude");
+    }
+
+    #[test]
+    fn non_cometix_runtime_operation_skips_cometix_guard() {
+        let guard_ran = std::cell::Cell::new(false);
+        let operation_ran = std::cell::Cell::new(false);
+        let result = run_after_tool_runtime_preflight_with(
+            "codex",
+            || {
+                guard_ran.set(true);
+                Err("must not be observed".to_string())
+            },
+            || operation_ran.set(true),
+        );
+
+        assert!(result.is_ok());
+        assert!(!guard_ran.get());
+        assert!(operation_ran.get());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn private_temp_artifacts_are_unique_nested_and_do_not_overwrite_legacy_links() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ReloadedTestHome::set(temp.path());
+        let private_root = crate::config::get_app_config_dir();
+        let runtime_root = private_root.join("tmp");
+        let official_file = temp.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(official_file.parent().expect("official parent"))
+            .expect("create official root");
+        std::fs::create_dir_all(&runtime_root).expect("create private runtime root");
+        std::fs::write(&official_file, "official sentinel").expect("seed official file");
+
+        // This is the old deterministic target shape. A pre-planted hardlink
+        // there must be irrelevant because the new allocator chooses an
+        // exclusive random name and writes only through its open handle.
+        let legacy_target =
+            runtime_root.join(format!("cc_switch_tool_install_{}.bat", std::process::id()));
+        std::fs::hard_link(&official_file, &legacy_target).expect("seed legacy hardlink");
+
+        let mut first = create_private_temp_file("tool_install", ".bat")
+            .expect("create first private temp file");
+        let mut second = create_private_temp_file("../../escape", ".bat")
+            .expect("create second private temp file");
+        write_private_temp_handle(&mut first, b"first").expect("write first file");
+        write_private_temp_handle(&mut second, b"second").expect("write second file");
+
+        assert_ne!(first.path(), second.path());
+        for path in [first.path(), second.path()] {
+            assert!(crate::app_store::path_is_same_or_nested(
+                path,
+                &runtime_root
+            ));
+            assert_ne!(path, legacy_target);
+        }
+        assert_eq!(
+            std::fs::read_to_string(&official_file).expect("read official sentinel"),
+            "official sentinel"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&legacy_target).expect("read legacy hardlink"),
+            "official sentinel"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn private_runtime_temp_dir_rejects_alias_to_official_claude() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ReloadedTestHome::set(temp.path());
+        let official = temp.path().join(".claude");
+        let private_root = crate::config::get_app_config_dir();
+        let runtime_root = private_root.join("tmp");
+        std::fs::create_dir_all(&official).expect("create official root");
+        std::fs::create_dir_all(&private_root).expect("create private root");
+        assert!(
+            alias_directory(&official, &runtime_root),
+            "create private temp alias"
+        );
+
+        let result = create_private_temp_file("provider-config", ".json");
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&runtime_root).expect("remove test junction");
+
+        assert!(result.is_err(), "private temp alias must fail closed");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn provider_terminal_rejects_official_claude_but_allows_cometix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ReloadedTestHome::set(temp.path());
+        assert!(require_provider_terminal_app("claude").is_err());
+        assert_eq!(
+            require_provider_terminal_app("claude-cometix").expect("Cometix is managed"),
+            AppType::ClaudeCometix
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tool_lifecycle_rejects_official_claude_but_allows_cometix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ReloadedTestHome::set(temp.path());
+        assert!(ensure_tool_lifecycle_management_allowed(&["claude"]).is_err());
+        assert!(ensure_tool_lifecycle_management_allowed(&[COMETIX_CLAUDE_TOOL]).is_ok());
+        assert!(ensure_tool_lifecycle_management_allowed(&["codex"]).is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cometix_lifecycle_rejects_a_config_root_alias_to_official_claude() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ReloadedTestHome::set(temp.path());
+        let official = temp.path().join(".claude");
+        let cometix = temp.path().join(".hlclaude");
+        std::fs::create_dir_all(&official).expect("create official config root");
+        assert!(
+            alias_directory(&official, &cometix),
+            "create Cometix config alias"
+        );
+
+        let result = ensure_tool_lifecycle_management_allowed(&[COMETIX_CLAUDE_TOOL]);
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&cometix).expect("remove test junction");
+
+        assert!(result.is_err(), "Cometix lifecycle must fail closed");
+    }
+
+    #[test]
+    fn cometix_lifecycle_rejects_an_installer_directory_alias_to_official_claude() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let official = temp.path().join(".claude");
+        let local_root = temp.path().join(".local");
+        let aliased_bin = local_root.join("bin");
+        std::fs::create_dir_all(&official).expect("create official root");
+        std::fs::create_dir_all(&local_root).expect("create local root");
+        assert!(
+            alias_directory(&official, &aliased_bin),
+            "create installer alias"
+        );
+
+        assert!(ensure_cometix_install_paths_isolated_at(temp.path()).is_err());
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&aliased_bin).expect("remove test junction");
+    }
+
+    #[test]
+    fn cometix_lifecycle_rejects_a_nested_install_prefix_alias_to_official_claude() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let official = temp.path().join(".claude");
+        let install_prefix = temp.path().join(".local").join("share").join("hlclaude");
+        let aliased_modules = install_prefix.join("node_modules");
+        std::fs::create_dir_all(&official).expect("create official root");
+        std::fs::create_dir_all(&install_prefix).expect("create install prefix");
+        assert!(
+            alias_directory(&official, &aliased_modules),
+            "create nested install alias"
+        );
+
+        assert!(ensure_cometix_install_paths_isolated_at(temp.path()).is_err());
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&aliased_modules).expect("remove test junction");
+    }
+
+    #[test]
+    fn cometix_lifecycle_rejects_launcher_hardlink_to_upstream_database() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let upstream_root = temp.path().join(".cc-switch");
+        let bin_root = temp.path().join(".local").join("bin");
+        std::fs::create_dir_all(&upstream_root).expect("create upstream root");
+        std::fs::create_dir_all(&bin_root).expect("create bin root");
+        let upstream_db = upstream_root.join("cc-switch.db");
+        let launcher = bin_root.join(if cfg!(windows) {
+            "hlclaude.cmd"
+        } else {
+            "hlclaude"
+        });
+        std::fs::write(&upstream_db, "official sentinel").expect("seed upstream database");
+        std::fs::hard_link(&upstream_db, &launcher).expect("hardlink launcher");
+
+        assert!(ensure_cometix_install_paths_isolated_at(temp.path()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&upstream_db).expect("read upstream database"),
+            "official sentinel"
+        );
+    }
+
+    #[test]
+    fn cometix_lifecycle_rejects_a_hardlink_buried_in_the_install_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let upstream_file = temp.path().join(".claude/CLAUDE.md");
+        let installed_file = temp
+            .path()
+            .join(".local")
+            .join("share")
+            .join("hlclaude")
+            .join("node_modules")
+            .join("pkg")
+            .join("cli.js");
+        std::fs::create_dir_all(upstream_file.parent().expect("official parent"))
+            .expect("create official root");
+        std::fs::create_dir_all(installed_file.parent().expect("install parent"))
+            .expect("create install tree");
+        std::fs::write(&upstream_file, "official sentinel").expect("seed official file");
+        std::fs::hard_link(&upstream_file, &installed_file).expect("hardlink installed file");
+
+        assert!(ensure_cometix_install_paths_isolated_at(temp.path()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&upstream_file).expect("read official sentinel"),
+            "official sentinel"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wsl_home_path_maps_to_the_selected_distribution_unc_root() {
+        assert_eq!(
+            crate::fork_policy::wsl_home_unc_path("Ubuntu-24.04", b"/home/alice\n")
+                .expect("map WSL home"),
+            PathBuf::from(r"\\wsl.localhost\Ubuntu-24.04\home\alice")
+        );
+        assert!(crate::fork_policy::wsl_home_unc_path("Ubuntu", b"/home/../root").is_err());
+    }
 
     /// 探测 helper 正常路径：spawn（含 pre_exec setsid）能启动、输出能捕获。
     /// `/bin/echo --version` 在 macOS/Linux 均即刻成功退出。
@@ -5552,14 +6137,14 @@ mod tests {
     }
 
     #[test]
-    fn cometix_posix_lifecycle_uses_custom_config_dir_and_preserves_caller_env() {
+    fn cometix_posix_lifecycle_uses_custom_config_dir_and_overrides_caller_env() {
         let command = cometix_npm_install_command_at(
             LifecycleCommandShell::Posix,
             Path::new("/profiles/Cometix Config"),
         );
 
         assert!(command.contains("'/profiles/Cometix Config'"));
-        assert!(command.contains(r#"if [ -z "${CLAUDE_CONFIG_DIR:-}" ]"#));
+        assert!(!command.contains(r#"if [ -z "${CLAUDE_CONFIG_DIR:-}" ]"#));
         assert!(command.contains(r#"CLAUDE_CONFIG_DIR='"'"'/profiles/Cometix Config'"'"'"#));
         assert!(command.contains("export CLAUDE_CONFIG_DIR"));
     }
@@ -5704,7 +6289,8 @@ set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.hlclaude"
 
         ensure_cometix_launcher_at(home.path(), &config_dir).expect("create Cometix launcher");
         let generated = std::fs::read_to_string(&launcher).expect("read generated launcher");
-        assert!(generated.contains("if not defined CLAUDE_CONFIG_DIR"));
+        assert!(!generated.contains("if not defined CLAUDE_CONFIG_DIR"));
+        assert!(generated.contains("set \"CLAUDE_CONFIG_DIR="));
         assert!(generated.contains(&config_dir.to_string_lossy().to_string()));
         assert!(generated.contains(r#"@cometix\claude-code\cli.js"#));
 

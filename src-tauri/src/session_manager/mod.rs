@@ -65,7 +65,16 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
         let h6 = s.spawn(hermes::scan_sessions);
         let h7 = s.spawn(grokbuild::scan_sessions);
         let h8 = s.spawn(pi::scan_sessions);
-        let h9 = s.spawn(claude::scan_cometix_sessions);
+        let h9 = s.spawn(|| {
+            if crate::fork_policy::app_management_allowed(
+                &crate::app_config::AppType::ClaudeCometix,
+            ) && cometix_session_root().is_ok()
+            {
+                claude::scan_cometix_sessions()
+            } else {
+                Vec::new()
+            }
+        });
         (
             h1.join().unwrap_or_default(),
             h2.join().unwrap_or_default(),
@@ -137,6 +146,11 @@ pub fn delete_session(
     session_id: &str,
     source_path: &str,
 ) -> Result<bool, String> {
+    if let Some(app) = session_deletion_app_type(provider_id) {
+        crate::fork_policy::ensure_app_management_allowed(&app)
+            .map_err(|error| error.to_string())?;
+    }
+
     // SQLite sessions bypass the file-based deletion path
     if provider_id == "opencode" && source_path.starts_with("sqlite:") {
         return opencode::delete_session_sqlite(session_id, source_path);
@@ -147,6 +161,14 @@ pub fn delete_session(
 
     let roots = provider_roots(provider_id)?;
     delete_session_with_roots(provider_id, session_id, Path::new(source_path), &roots)
+}
+
+fn session_deletion_app_type(provider_id: &str) -> Option<crate::app_config::AppType> {
+    match provider_id {
+        "claude" => Some(crate::app_config::AppType::Claude),
+        "claude-cometix" => Some(crate::app_config::AppType::ClaudeCometix),
+        _ => None,
+    }
 }
 
 pub fn delete_sessions(requests: &[DeleteSessionRequest]) -> Vec<DeleteSessionOutcome> {
@@ -223,9 +245,7 @@ fn provider_roots(provider_id: &str) -> Result<Vec<PathBuf>, String> {
     let roots = match provider_id {
         "codex" => codex::session_roots(),
         "claude" => vec![crate::config::get_claude_config_dir().join("projects")],
-        "claude-cometix" => {
-            vec![crate::config::get_claude_cometix_config_dir().join("projects")]
-        }
+        "claude-cometix" => vec![cometix_session_root()?],
         "opencode" => vec![opencode::get_opencode_data_dir()],
         "openclaw" => vec![crate::openclaw_config::get_openclaw_dir().join("agents")],
         "gemini" => vec![crate::gemini_config::get_gemini_dir().join("tmp")],
@@ -236,6 +256,13 @@ fn provider_roots(provider_id: &str) -> Result<Vec<PathBuf>, String> {
     };
 
     Ok(roots)
+}
+
+fn cometix_session_root() -> Result<PathBuf, String> {
+    let root = crate::config::get_claude_cometix_config_dir().join("projects");
+    crate::fork_policy::ensure_cometix_managed_config_path_isolated(&root)
+        .map_err(|error| error.to_string())?;
+    Ok(root)
 }
 
 fn canonicalize_existing_path(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -286,6 +313,45 @@ where
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    struct ReloadedTestHome(Option<std::ffi::OsString>);
+
+    impl ReloadedTestHome {
+        fn set(home: &Path) -> Self {
+            let guard = Self(std::env::var_os("CC_SWITCH_TEST_HOME"));
+            std::env::set_var("CC_SWITCH_TEST_HOME", home);
+            crate::settings::reload_settings().expect("reload isolated settings");
+            guard
+        }
+    }
+
+    impl Drop for ReloadedTestHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = crate::settings::reload_settings();
+        }
+    }
+
+    #[cfg(unix)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        std::os::unix::fs::symlink(source, destination).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(source, destination).is_ok() {
+            return true;
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(destination)
+            .arg(source)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 
     fn write_codex_session(path: &Path, session_id: &str) {
         std::fs::write(
@@ -366,6 +432,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn cometix_session_root_is_independent_from_official_claude() {
         let official = provider_roots("claude").expect("official Claude roots");
         let cometix = provider_roots("claude-cometix").expect("Cometix roots");
@@ -379,6 +446,29 @@ mod tests {
             vec![crate::config::get_claude_cometix_config_dir().join("projects")]
         );
         assert_ne!(official, cometix);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cometix_session_root_rejects_an_inner_alias_to_official_projects() {
+        let temp = tempdir().expect("tempdir");
+        let _home = ReloadedTestHome::set(temp.path());
+        let official_projects = temp.path().join(".claude").join("projects");
+        let cometix_root = temp.path().join(".hlclaude");
+        let cometix_projects = cometix_root.join("projects");
+        std::fs::create_dir_all(&official_projects).expect("create official projects");
+        std::fs::create_dir_all(&cometix_root).expect("create Cometix root");
+        assert!(
+            alias_directory(&official_projects, &cometix_projects),
+            "create Cometix projects alias"
+        );
+
+        let result = provider_roots("claude-cometix");
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&cometix_projects).expect("remove test junction");
+
+        assert!(result.is_err(), "aliased Cometix projects must be rejected");
     }
 
     #[test]
@@ -469,6 +559,38 @@ mod tests {
         .expect_err("official Claude must reject Cometix history paths");
 
         assert!(error.contains("outside provider roots"));
+    }
+
+    #[test]
+    fn private_fork_rejects_official_claude_session_deletion_at_service_boundary() {
+        let error = delete_session("claude", "official-session", "missing.jsonl")
+            .expect_err("official Claude history deletion must be disabled");
+        assert!(error.contains("official CC Switch"));
+
+        let outcomes = delete_sessions(&[DeleteSessionRequest {
+            provider_id: "claude".to_string(),
+            session_id: "official-session".to_string(),
+            source_path: "missing.jsonl".to_string(),
+        }]);
+        assert_eq!(outcomes.len(), 1);
+        assert!(!outcomes[0].success);
+        assert!(outcomes[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("official CC Switch")));
+    }
+
+    #[test]
+    fn claude_session_deletion_uses_the_matching_product_policy_app() {
+        assert_eq!(
+            session_deletion_app_type("claude"),
+            Some(crate::app_config::AppType::Claude)
+        );
+        assert_eq!(
+            session_deletion_app_type("claude-cometix"),
+            Some(crate::app_config::AppType::ClaudeCometix)
+        );
+        assert_eq!(session_deletion_app_type("codex"), None);
     }
 
     #[test]

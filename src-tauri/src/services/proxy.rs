@@ -400,6 +400,18 @@ pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
 }
 
+fn managed_proxy_takeover_apps() -> Vec<AppType> {
+    [
+        AppType::Claude,
+        AppType::Codex,
+        AppType::Gemini,
+        AppType::GrokBuild,
+    ]
+    .into_iter()
+    .filter(crate::fork_policy::app_management_allowed)
+    .collect()
+}
+
 impl ProxyService {
     pub fn new(db: Arc<Database>) -> Self {
         let codex_oauth_manager =
@@ -695,6 +707,8 @@ impl ProxyService {
         &self,
         provider: &Provider,
     ) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(&AppType::Claude)
+            .map_err(String::from)?;
         let effective_provider = self.claude_provider_with_effective_settings(provider)?;
         let mut effective_settings = effective_provider.settings_config.clone();
         let (proxy_url, _) = self.build_proxy_urls().await?;
@@ -1148,6 +1162,7 @@ impl ProxyService {
     /// - 关闭：仅恢复当前 app 的 Live 配置；若无其它接管，则自动停止代理服务
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
         let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        crate::fork_policy::ensure_app_management_allowed(&app).map_err(String::from)?;
         if !app.supports_local_proxy() {
             return Err(format!("{} 不支持本地路由", app.as_str()));
         }
@@ -1381,6 +1396,7 @@ impl ProxyService {
     /// 代理服务本身保持运行；当最后一个应用也关闭接管后，下次用户手动关闭
     /// 代理或程序退出时会自然停止。
     pub fn disable_takeover_for_app_sync(&self, app_type: &AppType) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         let app_type_str = app_type.as_str();
 
         // 1) 恢复原始 Live 配置（备份 → SSOT → 清理占位符 三层兜底）
@@ -1691,9 +1707,11 @@ impl ProxyService {
     }
 
     async fn sync_live_to_providers(&self) -> Result<(), String> {
-        if let Ok(live_config) = self.read_claude_live() {
-            self.sync_live_config_to_provider(&AppType::Claude, &live_config)
-                .await?;
+        if crate::fork_policy::app_management_allowed(&AppType::Claude) {
+            if let Ok(live_config) = self.read_claude_live() {
+                self.sync_live_config_to_provider(&AppType::Claude, &live_config)
+                    .await?;
+            }
         }
 
         if let Ok(live_config) = self.read_codex_live() {
@@ -1829,20 +1847,22 @@ impl ProxyService {
     /// 备份各应用的 Live 配置
     async fn backup_live_configs(&self) -> Result<(), String> {
         // Claude
-        if let Ok(config) = self.read_claude_live() {
-            // 跳过已被代理接管的 Live：避免把代理占位符当作"原始 Live"存进备份槽。
-            // 否则下次 start_with_takeover 在异常历史状态下（Live 已是占位符）再次
-            // 调用本函数，会用代理配置覆盖一个原本正常的备份；之后 stop 恢复时
-            // 即便走到备份路径也会把代理占位符再写回 Live，永久卡在本地代理地址。
-            if Self::live_has_proxy_placeholder_for_app(&AppType::Claude, &config) {
-                log::warn!("claude Live 已被代理接管，不备份（避免把代理配置固化进备份槽）；下次 stop 会从 SSOT 重建 Live");
-            } else {
-                let json_str = serde_json::to_string(&config)
-                    .map_err(|e| format!("序列化 Claude 配置失败: {e}"))?;
-                self.db
-                    .save_live_backup("claude", &json_str)
-                    .await
-                    .map_err(|e| format!("备份 Claude 配置失败: {e}"))?;
+        if crate::fork_policy::app_management_allowed(&AppType::Claude) {
+            if let Ok(config) = self.read_claude_live() {
+                // 跳过已被代理接管的 Live：避免把代理占位符当作"原始 Live"存进备份槽。
+                // 否则下次 start_with_takeover 在异常历史状态下（Live 已是占位符）再次
+                // 调用本函数，会用代理配置覆盖一个原本正常的备份；之后 stop 恢复时
+                // 即便走到备份路径也会把代理占位符再写回 Live，永久卡在本地代理地址。
+                if Self::live_has_proxy_placeholder_for_app(&AppType::Claude, &config) {
+                    log::warn!("claude Live 已被代理接管，不备份（避免把代理配置固化进备份槽）；下次 stop 会从 SSOT 重建 Live");
+                } else {
+                    let json_str = serde_json::to_string(&config)
+                        .map_err(|e| format!("序列化 Claude 配置失败: {e}"))?;
+                    self.db
+                        .save_live_backup("claude", &json_str)
+                        .await
+                        .map_err(|e| format!("备份 Claude 配置失败: {e}"))?;
+                }
             }
         }
 
@@ -1895,6 +1915,7 @@ impl ProxyService {
 
     /// 备份指定应用的 Live 配置（严格模式：目标配置不存在则返回错误）
     async fn backup_live_config_strict(&self, app_type: &AppType) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         let (app_type_str, mut config) = match app_type {
             AppType::Claude => ("claude", self.read_claude_live()?),
             AppType::Codex => ("codex", self.read_codex_live()?),
@@ -2009,16 +2030,19 @@ impl ProxyService {
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
 
         // Claude: 修改 ANTHROPIC_BASE_URL，使用占位符替代真实 Token（代理会注入真实 Token）
-        if let Ok(mut live_config) = self.read_claude_live() {
-            let claude_provider = self.require_current_provider_for_app(&AppType::Claude)?;
-            let claude_provider = self.claude_provider_with_effective_settings(&claude_provider)?;
-            Self::apply_claude_takeover_fields_for_provider(
-                &mut live_config,
-                &proxy_url,
-                &claude_provider,
-            );
-            self.write_claude_live(&live_config)?;
-            log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
+        if crate::fork_policy::app_management_allowed(&AppType::Claude) {
+            if let Ok(mut live_config) = self.read_claude_live() {
+                let claude_provider = self.require_current_provider_for_app(&AppType::Claude)?;
+                let claude_provider =
+                    self.claude_provider_with_effective_settings(&claude_provider)?;
+                Self::apply_claude_takeover_fields_for_provider(
+                    &mut live_config,
+                    &proxy_url,
+                    &claude_provider,
+                );
+                self.write_claude_live(&live_config)?;
+                log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
+            }
         }
 
         // Codex: project the selected provider through the local Responses endpoint.
@@ -2061,6 +2085,7 @@ impl ProxyService {
 
     /// 接管指定应用的 Live 配置（严格模式：目标配置不存在则返回错误）
     async fn takeover_live_config_strict(&self, app_type: &AppType) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
 
@@ -2123,6 +2148,7 @@ impl ProxyService {
 
     /// 接管指定应用的 Live 配置（尽力而为：配置不存在/读取失败则跳过）
     async fn takeover_live_config_best_effort(&self, app_type: &AppType) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         let (proxy_url, _) = self.build_proxy_urls().await?;
         let proxy_grok_base_url = format!("{}/grokbuild/v1", proxy_url.trim_end_matches('/'));
 
@@ -2198,6 +2224,7 @@ impl ProxyService {
         &self,
         app_type: &AppType,
     ) -> Result<bool, String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         let app_type_str = app_type.as_str();
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
         let current_config = match self.db.get_proxy_config_for_app(app_type_str).await {
@@ -2218,6 +2245,7 @@ impl ProxyService {
     }
 
     async fn restore_live_config_for_app_inner(&self, app_type: &AppType) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         match app_type {
             AppType::Claude => {
                 if let Ok(Some(backup)) = self.db.get_live_backup("claude").await {
@@ -2266,7 +2294,10 @@ impl ProxyService {
             AppType::Codex,
             AppType::Gemini,
             AppType::GrokBuild,
-        ] {
+        ]
+        .into_iter()
+        .filter(crate::fork_policy::app_management_allowed)
+        {
             if let Err(e) = self
                 .restore_live_config_for_app_with_fallback(&app_type)
                 .await
@@ -2286,6 +2317,7 @@ impl ProxyService {
         &self,
         app_type: &AppType,
     ) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         let _guard = self.switch_locks.lock_for_app(app_type.as_str()).await;
         self.restore_live_config_for_app_with_fallback_inner(app_type)
             .await
@@ -2295,6 +2327,7 @@ impl ProxyService {
         &self,
         app_type: &AppType,
     ) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         let app_type_str = app_type.as_str();
 
         // 1) 优先从 Live 备份恢复（这是"原始 Live"的唯一可靠来源）
@@ -2351,6 +2384,7 @@ impl ProxyService {
     }
 
     fn write_live_config_for_app(&self, app_type: &AppType, config: &Value) -> Result<(), String> {
+        crate::fork_policy::ensure_app_management_allowed(app_type).map_err(String::from)?;
         match app_type {
             AppType::Claude => self.write_claude_live(config),
             AppType::Codex => self.write_codex_restore_backup(config),
@@ -2681,9 +2715,11 @@ impl ProxyService {
     /// 用于兜底处理：当数据库备份缺失但 Live 文件已经写成代理占位符时，
     /// 启动流程可以据此触发恢复逻辑。
     pub fn detect_takeover_in_live_configs(&self) -> bool {
-        if let Ok(config) = self.read_claude_live() {
-            if Self::is_claude_live_taken_over(&config) {
-                return true;
+        if crate::fork_policy::app_management_allowed(&AppType::Claude) {
+            if let Ok(config) = self.read_claude_live() {
+                if Self::is_claude_live_taken_over(&config) {
+                    return true;
+                }
             }
         }
 
@@ -2946,6 +2982,8 @@ impl ProxyService {
         app_type: &str,
         provider_id: &str,
     ) -> Result<HotSwitchOutcome, String> {
+        let app = AppType::from_str(app_type).map_err(|_| format!("无效的应用类型: {app_type}"))?;
+        crate::fork_policy::ensure_app_management_allowed(&app).map_err(String::from)?;
         let _guard = self.switch_locks.lock_for_app(app_type).await;
         self.hot_switch_provider_inner(app_type, provider_id).await
     }
@@ -2957,6 +2995,7 @@ impl ProxyService {
     ) -> Result<HotSwitchOutcome, String> {
         let app_type_enum =
             AppType::from_str(app_type).map_err(|_| format!("无效的应用类型: {app_type}"))?;
+        crate::fork_policy::ensure_app_management_allowed(&app_type_enum).map_err(String::from)?;
         let provider = self
             .db
             .get_provider_by_id(provider_id, app_type)
@@ -3926,12 +3965,7 @@ impl ProxyService {
             // 按 switch lock -> server lock 的顺序执行，反向持锁会造成死锁。
             drop(server_guard);
             let mut updated_any = false;
-            for app_type in [
-                AppType::Claude,
-                AppType::Codex,
-                AppType::Gemini,
-                AppType::GrokBuild,
-            ] {
+            for app_type in managed_proxy_takeover_apps() {
                 updated_any |= self
                     .reproject_takeover_live_config_if_enabled(&app_type)
                     .await?;
@@ -4081,6 +4115,320 @@ mod tests {
         assert!(service.set_takeover_for_app("pi", true).await.is_err());
         assert!(!service.is_running().await);
         assert!(service.switch_proxy_target("pi", "missing").await.is_err());
+    }
+
+    #[test]
+    fn proxy_reprojection_apps_exclude_official_claude_in_private_fork() {
+        let apps = managed_proxy_takeover_apps();
+        assert!(!apps.contains(&AppType::Claude));
+        assert!(apps.contains(&AppType::Codex));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn crash_recovery_preserves_official_claude_live_in_private_fork() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let official_path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(official_path.parent().expect("official Claude config dir"))
+            .expect("create official Claude config dir");
+        let sentinel = br#"{"authMode":"oauth","owner":"official"}"#;
+        std::fs::write(&official_path, sentinel).expect("seed official Claude live config");
+        db.save_live_backup(
+            "claude",
+            r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"stale-fork-token","ANTHROPIC_BASE_URL":"https://relay.example.com"}}"#,
+        )
+        .await
+        .expect("seed stale fork backup");
+
+        service
+            .recover_from_crash()
+            .await
+            .expect("recover allowed application backups");
+
+        assert_eq!(
+            std::fs::read(&official_path).expect("read official Claude live config"),
+            sentinel,
+            "private-fork crash recovery must not restore a stale official Claude backup"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn private_fork_rejects_official_claude_takeover_disable_without_side_effects() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let official_path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(official_path.parent().expect("official Claude config dir"))
+            .expect("create official Claude config dir");
+        let sentinel = br#"{"authMode":"oauth","owner":"official"}"#;
+        std::fs::write(&official_path, sentinel).expect("seed official Claude live config");
+
+        let stale_backup = r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"stale-private-token","ANTHROPIC_BASE_URL":"https://relay.example.com"}}"#;
+        db.save_live_backup("claude", stale_backup)
+            .await
+            .expect("seed stale private-fork backup");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("get Claude proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("seed stale Claude takeover state");
+
+        let disable_error = service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect_err("private fork must reject official Claude takeover changes");
+        assert!(disable_error.contains("Official Claude Code"));
+
+        let enable_error = service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect_err("private fork must reject official Claude takeover activation");
+        assert!(enable_error.contains("Official Claude Code"));
+        assert!(
+            !service.is_running().await,
+            "rejected official Claude activation must not start the proxy"
+        );
+
+        assert_eq!(
+            std::fs::read(&official_path).expect("read official Claude live config"),
+            sentinel,
+            "rejecting stale takeover state must preserve official Claude live config"
+        );
+        assert!(
+            db.get_proxy_config_for_app("claude")
+                .await
+                .expect("read stale Claude proxy state")
+                .enabled,
+            "a rejected operation must not mutate legacy private-fork state"
+        );
+        assert_eq!(
+            db.get_live_backup("claude")
+                .await
+                .expect("read stale Claude backup")
+                .expect("stale Claude backup remains readable")
+                .original_config,
+            stale_backup,
+            "a rejected operation must not consume the stale backup"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn private_fork_hot_switch_entrypoints_reject_official_claude_without_side_effects() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let official_path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(official_path.parent().expect("official Claude config dir"))
+            .expect("create official Claude config dir");
+        let sentinel = br#"{"authMode":"oauth","owner":"official"}"#;
+        std::fs::write(&official_path, sentinel).expect("seed official Claude live config");
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "A".to_string(),
+            json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "a-token" } }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "B".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "b-token",
+                    "ANTHROPIC_BASE_URL": "https://relay.example.com"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider_a)
+            .expect("seed provider A");
+        db.save_provider("claude", &provider_b)
+            .expect("seed provider B");
+        db.set_current_provider("claude", "a")
+            .expect("seed DB current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some("a"))
+            .expect("seed local current provider");
+        let stale_backup =
+            serde_json::to_string(&provider_a.settings_config).expect("serialize stale backup");
+        db.save_live_backup("claude", &stale_backup)
+            .await
+            .expect("seed stale Claude backup");
+
+        let public_error = service
+            .hot_switch_provider("claude", "b")
+            .await
+            .expect_err("public hot switch must reject official Claude");
+        assert!(
+            public_error.contains("Official Claude Code"),
+            "public hot switch should report the private-fork boundary: {public_error}"
+        );
+
+        let inner_error = service
+            .hot_switch_provider_inner("claude", "b")
+            .await
+            .expect_err("inner hot switch must independently reject official Claude");
+        assert!(
+            inner_error.contains("Official Claude Code"),
+            "inner hot switch should report the private-fork boundary: {inner_error}"
+        );
+
+        let desktop_error = service
+            .hot_switch_provider_inner("claude-desktop", "missing")
+            .await
+            .expect_err("inner hot switch must reject Claude Desktop before provider lookup");
+        assert!(
+            desktop_error
+                .contains("Official Claude Code and Claude Desktop management is disabled"),
+            "Claude Desktop should hit the ownership boundary first: {desktop_error}"
+        );
+
+        assert_eq!(
+            std::fs::read(&official_path).expect("read official Claude live config"),
+            sentinel,
+            "failover hot switch must never rewrite official Claude live config"
+        );
+        assert_eq!(
+            db.get_current_provider("claude").expect("read DB current"),
+            Some("a".to_string()),
+            "a rejected hot switch must preserve the private DB's legacy current row"
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            Some("a"),
+            "a rejected hot switch must preserve local legacy current state"
+        );
+        assert_eq!(
+            db.get_live_backup("claude")
+                .await
+                .expect("read stale backup")
+                .expect("stale backup remains readable")
+                .original_config,
+            stale_backup,
+            "a rejected hot switch must not refresh stale official Claude backup state"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn private_fork_sync_disable_and_restore_reject_official_claude_without_side_effects() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let official_path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(official_path.parent().expect("official Claude config dir"))
+            .expect("create official Claude config dir");
+        let sentinel = br#"{"authMode":"oauth","owner":"official"}"#;
+        std::fs::write(&official_path, sentinel).expect("seed official Claude live config");
+
+        let stale_backup = r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"stale-private-token","ANTHROPIC_BASE_URL":"https://relay.example.com"}}"#;
+        futures::executor::block_on(db.save_live_backup("claude", stale_backup))
+            .expect("seed stale Claude backup");
+        let mut proxy_config = futures::executor::block_on(db.get_proxy_config_for_app("claude"))
+            .expect("get Claude proxy config");
+        proxy_config.enabled = true;
+        futures::executor::block_on(db.update_proxy_config_for_app(proxy_config))
+            .expect("seed stale Claude takeover state");
+
+        let disable_error = service
+            .disable_takeover_for_app_sync(&AppType::Claude)
+            .expect_err("sync disable must reject official Claude");
+        assert!(
+            disable_error.contains("Official Claude Code"),
+            "sync disable should report the private-fork boundary: {disable_error}"
+        );
+
+        let restore_error = futures::executor::block_on(
+            service.restore_live_config_for_app_with_fallback_inner(&AppType::Claude),
+        )
+        .expect_err("fallback restore must reject official Claude");
+        assert!(
+            restore_error.contains("Official Claude Code"),
+            "fallback restore should report the private-fork boundary: {restore_error}"
+        );
+
+        let simple_restore_error = futures::executor::block_on(
+            service.restore_live_config_for_app_inner(&AppType::Claude),
+        )
+        .expect_err("simple restore must reject official Claude");
+        assert!(
+            simple_restore_error.contains("Official Claude Code"),
+            "simple restore should report the private-fork boundary: {simple_restore_error}"
+        );
+
+        let desktop_error = service
+            .disable_takeover_for_app_sync(&AppType::ClaudeDesktop)
+            .expect_err("sync disable must reject Claude Desktop");
+        assert!(
+            desktop_error
+                .contains("Official Claude Code and Claude Desktop management is disabled"),
+            "Claude Desktop should hit the ownership boundary first: {desktop_error}"
+        );
+
+        assert_eq!(
+            std::fs::read(&official_path).expect("read official Claude live config"),
+            sentinel,
+            "sync teardown and restore entrypoints must preserve official Claude live config"
+        );
+        assert!(
+            futures::executor::block_on(db.get_proxy_config_for_app("claude"))
+                .expect("read stale Claude proxy state")
+                .enabled,
+            "rejected sync entrypoints must preserve legacy private-fork takeover state"
+        );
+        assert_eq!(
+            futures::executor::block_on(db.get_live_backup("claude"))
+                .expect("read stale Claude backup")
+                .expect("stale Claude backup remains readable")
+                .original_config,
+            stale_backup,
+            "rejected sync entrypoints must not consume legacy backup state"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn private_fork_rejects_direct_proxy_live_sync_for_official_claude() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db);
+        let official_path = crate::config::get_claude_settings_path();
+        std::fs::create_dir_all(official_path.parent().expect("official Claude config dir"))
+            .expect("create official Claude config dir");
+        let sentinel = br#"{"authMode":"oauth","owner":"official"}"#;
+        std::fs::write(&official_path, sentinel).expect("seed official Claude live config");
+        let stale_provider = Provider::with_id(
+            "stale".to_string(),
+            "Stale".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "stale-private-token",
+                    "ANTHROPIC_BASE_URL": "https://relay.example.com"
+                }
+            }),
+            None,
+        );
+
+        let error = service
+            .sync_claude_live_from_provider_while_proxy_active(&stale_provider)
+            .await
+            .expect_err("direct proxy projection must reject official Claude");
+        assert!(
+            error.contains("Official Claude Code"),
+            "direct projection should report the private-fork boundary: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&official_path).expect("read official Claude live config"),
+            sentinel,
+            "direct proxy projection must preserve official Claude live config"
+        );
     }
 
     async fn running_codex_base_url(service: &ProxyService) -> String {
@@ -4588,7 +4936,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn start_with_takeover_ephemeral_port_writes_actual_live_url() {
+    async fn private_fork_global_takeover_preserves_official_claude_live() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -4613,13 +4961,16 @@ mod tests {
             .expect("set db current provider");
         crate::settings::set_current_provider(&AppType::Claude, Some("p1"))
             .expect("set local current provider");
+        let official_live = json!({
+            "authMode": "oauth",
+            "owner": "official",
+            "env": {
+                "ANTHROPIC_API_KEY": "live-key",
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+            }
+        });
         service
-            .write_claude_live(&json!({
-                "env": {
-                    "ANTHROPIC_API_KEY": "live-key",
-                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
-                }
-            }))
+            .write_claude_live(&official_live)
             .expect("seed claude live config");
 
         let info = service
@@ -4634,16 +4985,10 @@ mod tests {
             "resolved dynamic port should be persisted for DB-only proxy URL paths"
         );
 
-        let live = service.read_claude_live().expect("read taken-over live");
-        let base_url = live
-            .get("env")
-            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
-            .and_then(|value| value.as_str())
-            .expect("taken-over base url");
-        assert_eq!(base_url, format!("http://127.0.0.1:{}", info.port));
-        assert!(
-            !base_url.contains(":0"),
-            "takeover must never write an unresolved :0 port"
+        assert_eq!(
+            service.read_claude_live().expect("read official live"),
+            official_live,
+            "the global legacy takeover path must skip official Claude in the private fork"
         );
 
         service
@@ -6772,7 +7117,7 @@ model = "gpt-5.1-codex"
 
     #[tokio::test]
     #[serial]
-    async fn switch_proxy_target_updates_live_backup_when_taken_over() {
+    async fn switch_proxy_target_updates_gemini_backup_when_taken_over() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -6784,7 +7129,7 @@ model = "gpt-5.1-codex"
             "A".to_string(),
             json!({
                 "env": {
-                    "ANTHROPIC_API_KEY": "a-key"
+                    "GEMINI_API_KEY": "a-key"
                 }
             }),
             None,
@@ -6794,37 +7139,37 @@ model = "gpt-5.1-codex"
             "B".to_string(),
             json!({
                 "env": {
-                    "ANTHROPIC_API_KEY": "b-key"
+                    "GEMINI_API_KEY": "b-key"
                 }
             }),
             None,
         );
-        db.save_provider("claude", &provider_a)
+        db.save_provider("gemini", &provider_a)
             .expect("save provider a");
-        db.save_provider("claude", &provider_b)
+        db.save_provider("gemini", &provider_b)
             .expect("save provider b");
-        db.set_current_provider("claude", "a")
+        db.set_current_provider("gemini", "a")
             .expect("set current provider");
 
         // 模拟"已接管"状态：存在 Live 备份（内容不重要，会被热切换更新）
-        db.save_live_backup("claude", "{\"env\":{}}")
+        db.save_live_backup("gemini", "{\"env\":{}}")
             .await
             .expect("seed live backup");
 
         service
-            .switch_proxy_target("claude", "b")
+            .switch_proxy_target("gemini", "b")
             .await
             .expect("switch proxy target");
 
         // 断言：本地 settings 的 current provider 已同步
         assert_eq!(
-            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            crate::settings::get_current_provider(&AppType::Gemini).as_deref(),
             Some("b")
         );
 
         // 断言：Live 备份已更新为目标供应商配置（用于 stop_with_restore 恢复）
         let backup = db
-            .get_live_backup("claude")
+            .get_live_backup("gemini")
             .await
             .expect("get live backup")
             .expect("backup exists");
@@ -6832,28 +7177,8 @@ model = "gpt-5.1-codex"
         assert_eq!(backup.original_config, expected);
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn hot_switch_provider_updates_claude_live_while_preserving_takeover_fields() {
-        let _home = TempHome::new();
-        crate::settings::reload_settings().expect("reload settings");
-
-        let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
-
-        let provider_a = Provider::with_id(
-            "a".to_string(),
-            "A".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_API_KEY": "a-key",
-                    "ANTHROPIC_BASE_URL": "https://api.a.example",
-                    "ANTHROPIC_MODEL": "claude-old"
-                },
-                "permissions": { "allow": ["Bash"] }
-            }),
-            None,
-        );
+    #[test]
+    fn claude_takeover_projection_uses_target_provider_fields() {
         let provider_b = Provider::with_id(
             "b".to_string(),
             "B".to_string(),
@@ -6874,39 +7199,16 @@ model = "gpt-5.1-codex"
             None,
         );
 
-        db.save_provider("claude", &provider_a)
-            .expect("save provider a");
-        db.save_provider("claude", &provider_b)
-            .expect("save provider b");
-        db.set_current_provider("claude", "a")
-            .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some("a"))
-            .expect("set local current provider");
-        db.save_live_backup(
-            "claude",
-            &serde_json::to_string(&provider_a.settings_config).expect("serialize provider a"),
-        )
-        .await
-        .expect("seed live backup");
-        service
-            .write_claude_live(&json!({
-                "env": {
-                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
-                    "ANTHROPIC_API_KEY": PROXY_TOKEN_PLACEHOLDER,
-                    "ANTHROPIC_MODEL": "stale-model",
-                    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Stale Sonnet",
-                    "CLAUDE_CODE_SUBAGENT_MODEL": "stale-subagent"
-                },
-                "permissions": { "allow": ["Bash"] }
-            }))
-            .expect("seed taken-over live file");
-
-        service
-            .hot_switch_provider("claude", "b")
-            .await
-            .expect("hot switch provider");
-
-        let live = service.read_claude_live().expect("read live config");
+        let expected_proxy_url = format!(
+            "http://127.0.0.1:{}",
+            crate::proxy::types::DEFAULT_PROXY_PORT
+        );
+        let mut live = provider_b.settings_config.clone();
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live,
+            &expected_proxy_url,
+            &provider_b,
+        );
         assert_eq!(
             live.get("permissions"),
             provider_b.settings_config.get("permissions"),
@@ -6918,10 +7220,6 @@ model = "gpt-5.1-codex"
                 .and_then(|v| v.as_str()),
             Some(PROXY_TOKEN_PLACEHOLDER),
             "takeover token placeholder should be preserved"
-        );
-        let expected_proxy_url = format!(
-            "http://127.0.0.1:{}",
-            crate::proxy::types::DEFAULT_PROXY_PORT
         );
         assert_eq!(
             live.get("env")
@@ -6989,19 +7287,11 @@ model = "gpt-5.1-codex"
             Some("deepseek-v4-pro[1M]"),
             "subagent model should follow the target provider during hot switch"
         );
-
-        let backup = db
-            .get_live_backup("claude")
-            .await
-            .expect("get live backup")
-            .expect("backup exists");
-        let expected = serde_json::to_string(&provider_b.settings_config).expect("serialize");
-        assert_eq!(backup.original_config, expected);
     }
 
     #[tokio::test]
     #[serial]
-    async fn hot_switch_provider_serializes_same_app_switches() {
+    async fn hot_switch_provider_serializes_same_managed_app_switches() {
         use tokio::time::{sleep, Duration};
 
         let _home = TempHome::new();
@@ -7013,50 +7303,50 @@ model = "gpt-5.1-codex"
         let provider_a = Provider::with_id(
             "a".to_string(),
             "A".to_string(),
-            json!({ "env": { "ANTHROPIC_API_KEY": "a-key" } }),
+            json!({ "env": { "GEMINI_API_KEY": "a-key" } }),
             None,
         );
         let provider_b = Provider::with_id(
             "b".to_string(),
             "B".to_string(),
-            json!({ "env": { "ANTHROPIC_API_KEY": "b-key" } }),
+            json!({ "env": { "GEMINI_API_KEY": "b-key" } }),
             None,
         );
         let provider_c = Provider::with_id(
             "c".to_string(),
             "C".to_string(),
-            json!({ "env": { "ANTHROPIC_API_KEY": "c-key" } }),
+            json!({ "env": { "GEMINI_API_KEY": "c-key" } }),
             None,
         );
 
-        db.save_provider("claude", &provider_a)
+        db.save_provider("gemini", &provider_a)
             .expect("save provider a");
-        db.save_provider("claude", &provider_b)
+        db.save_provider("gemini", &provider_b)
             .expect("save provider b");
-        db.save_provider("claude", &provider_c)
+        db.save_provider("gemini", &provider_c)
             .expect("save provider c");
-        db.set_current_provider("claude", "a")
+        db.set_current_provider("gemini", "a")
             .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some("a"))
+        crate::settings::set_current_provider(&AppType::Gemini, Some("a"))
             .expect("set local current provider");
-        db.save_live_backup("claude", "{\"env\":{}}")
+        db.save_live_backup("gemini", "{\"env\":{}}")
             .await
             .expect("seed live backup");
 
-        let guard = service.lock_switch_for_test("claude").await;
+        let guard = service.lock_switch_for_test("gemini").await;
         let service_for_b = service.clone();
         let service_for_c = service.clone();
 
         let switch_b = tokio::spawn(async move {
             service_for_b
-                .hot_switch_provider("claude", "b")
+                .hot_switch_provider("gemini", "b")
                 .await
                 .expect("switch to b")
         });
         sleep(Duration::from_millis(20)).await;
         let switch_c = tokio::spawn(async move {
             service_for_c
-                .hot_switch_provider("claude", "c")
+                .hot_switch_provider("gemini", "c")
                 .await
                 .expect("switch to c")
         });
@@ -7070,21 +7360,21 @@ model = "gpt-5.1-codex"
         assert!(outcome_c.logical_target_changed);
 
         assert_eq!(
-            crate::settings::get_effective_current_provider(&db, &AppType::Claude)
+            crate::settings::get_effective_current_provider(&db, &AppType::Gemini)
                 .expect("effective current"),
             Some("c".to_string())
         );
         assert_eq!(
-            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            crate::settings::get_current_provider(&AppType::Gemini).as_deref(),
             Some("c")
         );
         assert_eq!(
-            db.get_current_provider("claude").expect("db current"),
+            db.get_current_provider("gemini").expect("db current"),
             Some("c".to_string())
         );
 
         let backup = db
-            .get_live_backup("claude")
+            .get_live_backup("gemini")
             .await
             .expect("get live backup")
             .expect("backup exists");
@@ -7094,7 +7384,7 @@ model = "gpt-5.1-codex"
 
     #[tokio::test]
     #[serial]
-    async fn restore_waits_for_hot_switch_and_restores_latest_backup() {
+    async fn managed_app_restore_waits_for_hot_switch_and_restores_latest_backup() {
         use tokio::time::{sleep, Duration};
 
         let _home = TempHome::new();
@@ -7106,50 +7396,50 @@ model = "gpt-5.1-codex"
         let provider_a = Provider::with_id(
             "a".to_string(),
             "A".to_string(),
-            json!({ "env": { "ANTHROPIC_API_KEY": "a-key" } }),
+            json!({ "env": { "GEMINI_API_KEY": "a-key" } }),
             None,
         );
         let provider_b = Provider::with_id(
             "b".to_string(),
             "B".to_string(),
-            json!({ "env": { "ANTHROPIC_API_KEY": "b-key" } }),
+            json!({ "env": { "GEMINI_API_KEY": "b-key" } }),
             None,
         );
 
-        db.save_provider("claude", &provider_a)
+        db.save_provider("gemini", &provider_a)
             .expect("save provider a");
-        db.save_provider("claude", &provider_b)
+        db.save_provider("gemini", &provider_b)
             .expect("save provider b");
-        db.set_current_provider("claude", "a")
+        db.set_current_provider("gemini", "a")
             .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some("a"))
+        crate::settings::set_current_provider(&AppType::Gemini, Some("a"))
             .expect("set local current provider");
         db.save_live_backup(
-            "claude",
+            "gemini",
             &serde_json::to_string(&provider_a.settings_config).expect("serialize provider a"),
         )
         .await
         .expect("seed live backup");
         service
-            .write_claude_live(&json!({ "env": { "ANTHROPIC_API_KEY": "stale" } }))
+            .write_gemini_live(&json!({ "env": { "GEMINI_API_KEY": "stale" } }))
             .expect("seed live file");
 
-        let guard = service.lock_switch_for_test("claude").await;
+        let guard = service.lock_switch_for_test("gemini").await;
         let service_for_switch = service.clone();
         let service_for_restore = service.clone();
 
         let switch_to_b = tokio::spawn(async move {
             service_for_switch
-                .hot_switch_provider("claude", "b")
+                .hot_switch_provider("gemini", "b")
                 .await
                 .expect("switch to b")
         });
         sleep(Duration::from_millis(20)).await;
         let restore = tokio::spawn(async move {
             service_for_restore
-                .restore_live_config_for_app_with_fallback(&AppType::Claude)
+                .restore_live_config_for_app_with_fallback(&AppType::Gemini)
                 .await
-                .expect("restore claude live")
+                .expect("restore Gemini live")
         });
 
         sleep(Duration::from_millis(20)).await;
@@ -7160,20 +7450,20 @@ model = "gpt-5.1-codex"
         assert!(outcome.logical_target_changed);
 
         assert_eq!(
-            crate::settings::get_effective_current_provider(&db, &AppType::Claude)
+            crate::settings::get_effective_current_provider(&db, &AppType::Gemini)
                 .expect("effective current"),
             Some("b".to_string())
         );
 
         let backup = db
-            .get_live_backup("claude")
+            .get_live_backup("gemini")
             .await
             .expect("get live backup")
             .expect("backup exists");
         let expected = serde_json::to_string(&provider_b.settings_config).expect("serialize");
         assert_eq!(backup.original_config, expected);
         assert_eq!(
-            service.read_claude_live().expect("read live"),
+            service.read_gemini_live().expect("read live"),
             provider_b.settings_config
         );
     }
@@ -8907,7 +9197,7 @@ requires_openai_auth = true
     /// Live from the provider DB instead.
     #[tokio::test]
     #[serial]
-    async fn restore_falls_through_to_ssot_when_backup_is_proxy_placeholder() {
+    async fn managed_app_restore_falls_through_to_ssot_when_backup_is_proxy_placeholder() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -8920,48 +9210,48 @@ requires_openai_auth = true
             "P1".to_string(),
             json!({
                 "env": {
-                    "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
-                    "ANTHROPIC_API_KEY": "real-key-from-db"
+                    "GOOGLE_GEMINI_BASE_URL": "https://generativelanguage.googleapis.com",
+                    "GEMINI_API_KEY": "real-key-from-db"
                 }
             }),
             None,
         );
-        db.save_provider("claude", &provider)
+        db.save_provider("gemini", &provider)
             .expect("save provider");
-        db.set_current_provider("claude", "p1")
+        db.set_current_provider("gemini", "p1")
             .expect("set current provider");
 
         // Seed backup with proxy placeholder (the corrupted state)
         let corrupted_backup = serde_json::to_string(&json!({
             "env": {
-                "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER,
-                "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721"
+                "GEMINI_API_KEY": PROXY_TOKEN_PLACEHOLDER,
+                "GOOGLE_GEMINI_BASE_URL": "http://127.0.0.1:15721"
             }
         }))
         .expect("serialize corrupted backup");
-        db.save_live_backup("claude", &corrupted_backup)
+        db.save_live_backup("gemini", &corrupted_backup)
             .await
             .expect("seed corrupted backup");
 
         // Seed Live with the same proxy placeholder (matches the corrupted state)
         service
-            .write_claude_live(&json!({
+            .write_gemini_live(&json!({
                 "env": {
-                    "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER,
-                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721"
+                    "GEMINI_API_KEY": PROXY_TOKEN_PLACEHOLDER,
+                    "GOOGLE_GEMINI_BASE_URL": "http://127.0.0.1:15721"
                 }
             }))
             .expect("seed taken-over live file");
 
         // Restore: must NOT use the corrupted backup
         service
-            .restore_live_config_for_app_with_fallback(&AppType::Claude)
+            .restore_live_config_for_app_with_fallback(&AppType::Gemini)
             .await
             .expect("restore should succeed via SSOT");
 
         // The backup should still be the corrupted one (we didn't touch it on this path)
         let backup_after = db
-            .get_live_backup("claude")
+            .get_live_backup("gemini")
             .await
             .expect("get backup")
             .expect("backup still exists");
@@ -8971,19 +9261,19 @@ requires_openai_auth = true
         );
 
         // Live should now reflect the SSOT (provider DB), NOT the proxy URL
-        let restored_live = service.read_claude_live().expect("read live");
+        let restored_live = service.read_gemini_live().expect("read live");
         let restored_url = restored_live
             .get("env")
-            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(|env| env.get("GOOGLE_GEMINI_BASE_URL"))
             .and_then(|v| v.as_str());
         assert_eq!(
             restored_url,
-            Some("https://api.minimaxi.com/anthropic"),
+            Some("https://generativelanguage.googleapis.com"),
             "Live must be rebuilt from SSOT, not from the corrupted backup"
         );
         let restored_key = restored_live
             .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|env| env.get("GEMINI_API_KEY"))
             .and_then(|v| v.as_str());
         assert_eq!(
             restored_key,
@@ -8993,7 +9283,7 @@ requires_openai_auth = true
         assert_ne!(
             restored_live
                 .get("env")
-                .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
+                .and_then(|env| env.get("GEMINI_API_KEY"))
                 .and_then(|v| v.as_str()),
             Some(PROXY_TOKEN_PLACEHOLDER),
             "Live must not still carry the proxy placeholder"
@@ -9693,7 +9983,7 @@ base_url = "https://third.example/v1"
     /// where stop-then-start cycles permanently corrupt the backup.
     #[tokio::test]
     #[serial]
-    async fn backup_skips_when_live_is_already_proxy_placeholder() {
+    async fn managed_app_backup_skips_when_live_is_already_proxy_placeholder() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -9703,34 +9993,34 @@ base_url = "https://third.example/v1"
         // Seed a GOOD backup (the "real" original Live)
         let good_backup = serde_json::to_string(&json!({
             "env": {
-                "ANTHROPIC_BASE_URL": "https://api.minimaxi.com/anthropic",
-                "ANTHROPIC_AUTH_TOKEN": "real-token"
+                "GOOGLE_GEMINI_BASE_URL": "https://generativelanguage.googleapis.com",
+                "GEMINI_API_KEY": "real-token"
             }
         }))
         .expect("serialize good backup");
-        db.save_live_backup("claude", &good_backup)
+        db.save_live_backup("gemini", &good_backup)
             .await
             .expect("seed good backup");
 
         // Seed Live with proxy placeholder (the corrupted state)
         service
-            .write_claude_live(&json!({
+            .write_gemini_live(&json!({
                 "env": {
-                    "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER,
-                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721"
+                    "GEMINI_API_KEY": PROXY_TOKEN_PLACEHOLDER,
+                    "GOOGLE_GEMINI_BASE_URL": "http://127.0.0.1:15721"
                 }
             }))
             .expect("seed taken-over live file");
 
         // Call backup_live_config_strict: must skip
         service
-            .backup_live_config_strict(&AppType::Claude)
+            .backup_live_config_strict(&AppType::Gemini)
             .await
             .expect("backup should succeed (no-op when live is placeholder)");
 
         // The good backup must still be intact
         let backup_after = db
-            .get_live_backup("claude")
+            .get_live_backup("gemini")
             .await
             .expect("get backup")
             .expect("backup still exists");

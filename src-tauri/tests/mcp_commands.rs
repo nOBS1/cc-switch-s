@@ -17,7 +17,126 @@ use support::{
 };
 
 #[test]
-fn import_default_config_claude_persists_provider() {
+fn private_fork_unified_mcp_mutation_preserves_official_and_syncs_cometix() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let official_path = get_claude_mcp_path();
+    let official_original = r#"{"mcpServers":{"official-owned":{"type":"stdio","command":"keep"}},"owner":"official-cc-switch"}"#;
+    fs::write(&official_path, official_original).expect("seed official Claude MCP config");
+
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    let cometix_path = cometix_dir.join(".claude.json");
+
+    let state = create_test_state().expect("create test state");
+    McpService::upsert_server(
+        &state,
+        McpServer {
+            id: "fork-managed".to_string(),
+            name: "Fork managed".to_string(),
+            server: json!({ "type": "stdio", "command": "hlclaude-mcp" }),
+            apps: McpApps {
+                claude: true,
+                claude_cometix: true,
+                ..McpApps::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    )
+    .expect("unified MCP mutation should keep managing Cometix");
+
+    assert_eq!(
+        fs::read_to_string(&official_path).expect("read official MCP config"),
+        official_original,
+        "the private fork must never project a unified MCP mutation to official Claude"
+    );
+    let cometix: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cometix_path).expect("read Cometix MCP config"))
+            .expect("parse Cometix MCP config");
+    assert_eq!(
+        cometix.pointer("/mcpServers/fork-managed/command"),
+        Some(&json!("hlclaude-mcp")),
+        "the same unified mutation must still project to Cometix"
+    );
+    assert!(
+        state
+            .db
+            .get_all_mcp_servers()
+            .expect("read stored MCP servers")
+            .values()
+            .all(|server| !server.apps.claude),
+        "the private fork must strip the official Claude assignment from unified MCP input"
+    );
+}
+
+#[test]
+fn private_fork_unified_mcp_delete_preserves_legacy_official_row() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let official_path = get_claude_mcp_path();
+    let official_original =
+        r#"{"mcpServers":{"official-owned":{"type":"stdio","command":"keep"}}}"#;
+    fs::write(&official_path, official_original).expect("seed official Claude MCP config");
+
+    let state = create_test_state().expect("create test state");
+    state
+        .db
+        .save_mcp_server(&McpServer {
+            id: "official-owned".to_string(),
+            name: "Legacy official row".to_string(),
+            server: json!({ "type": "stdio", "command": "keep" }),
+            apps: McpApps {
+                claude: true,
+                ..McpApps::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        })
+        .expect("seed legacy official MCP row");
+
+    assert!(
+        !McpService::delete_server(&state, "official-owned")
+            .expect("official-only delete is an inert compatibility call"),
+        "the private fork must not report deleting an official-only row"
+    );
+    assert!(
+        state
+            .db
+            .get_all_mcp_servers()
+            .expect("read MCP rows")
+            .contains_key("official-owned"),
+        "legacy official rows remain readable"
+    );
+    McpService::toggle_app(&state, "official-owned", AppType::Claude, false)
+        .expect("official-only toggle is an inert compatibility call");
+    assert!(
+        state
+            .db
+            .get_all_mcp_servers()
+            .expect("read MCP rows after toggle")
+            .get("official-owned")
+            .expect("legacy official row remains after toggle")
+            .apps
+            .claude,
+        "the private fork must not change the official Claude assignment"
+    );
+    assert_eq!(
+        fs::read_to_string(&official_path).expect("read official MCP config"),
+        official_original
+    );
+}
+
+#[test]
+fn private_fork_rejects_official_claude_default_import_without_mutating_live() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
@@ -42,31 +161,27 @@ fn import_default_config_claude_persists_provider() {
     config.ensure_app(&AppType::Claude);
     let state = create_test_state_with_config(&config).expect("create test state");
 
-    import_default_config_test_hook(&state, AppType::Claude)
-        .expect("import default config succeeds");
+    let original_contents =
+        serde_json::to_string_pretty(&settings).expect("serialize original settings");
+    let error = import_default_config_test_hook(&state, AppType::Claude)
+        .expect_err("official Claude import must be disabled in the private fork");
+    assert!(error.to_string().contains("official CC Switch"));
 
     // 验证内存状态
     let providers = state
         .db
         .get_all_providers(AppType::Claude.as_str())
         .expect("get all providers");
-    let current_id = state
-        .db
-        .get_current_provider(AppType::Claude.as_str())
-        .expect("get current provider");
-    assert_eq!(current_id.as_deref(), Some("default"));
-    let default_provider = providers.get("default").expect("default provider");
-    assert_eq!(
-        default_provider.settings_config, settings,
-        "default provider should capture live settings"
-    );
-
-    // 验证数据已持久化到数据库（v3.7.0+ 使用 SQLite 而非 config.json）
-    let db_path = home.join(".cc-switch-cometix").join("cc-switch.db");
     assert!(
-        db_path.exists(),
-        "importing default config should persist to cc-switch.db"
+        providers.is_empty(),
+        "official provider DB must stay untouched"
     );
+    assert_eq!(
+        fs::read_to_string(&settings_path).expect("read official live settings"),
+        original_contents,
+        "rejected import must preserve the official Claude live file"
+    );
+    let _ = home;
 }
 
 #[test]
@@ -322,7 +437,7 @@ fn import_default_config_grokbuild_broken_custom_live_still_errors() {
 }
 
 #[test]
-fn import_default_config_without_live_file_returns_error() {
+fn private_fork_rejects_official_claude_import_before_reading_live() {
     use support::create_test_state;
 
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -332,18 +447,8 @@ fn import_default_config_without_live_file_returns_error() {
     let state = create_test_state().expect("create test state");
 
     let err = import_default_config_test_hook(&state, AppType::Claude)
-        .expect_err("missing live file should error");
-    match err {
-        AppError::Localized { zh, .. } => assert!(
-            zh.contains("Claude Code 配置文件不存在"),
-            "unexpected error message: {zh}"
-        ),
-        AppError::Message(msg) => assert!(
-            msg.contains("Claude Code 配置文件不存在"),
-            "unexpected error message: {msg}"
-        ),
-        other => panic!("unexpected error variant: {other:?}"),
-    }
+        .expect_err("official Claude import should be rejected before reading live state");
+    assert!(err.to_string().contains("official CC Switch"));
 
     // 使用数据库架构，不再检查 config.json
     // 失败的导入不应该向数据库写入任何供应商
@@ -650,7 +755,7 @@ fn editing_and_projecting_cometix_same_id_preserves_official_live_definition() {
 
 #[test]
 #[allow(deprecated)]
-fn deleting_official_same_id_keeps_cometix_database_and_live_definition() {
+fn deleting_legacy_official_same_id_is_inert_and_keeps_cometix_definition() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
@@ -682,14 +787,14 @@ fn deleting_official_same_id_keeps_cometix_database_and_live_definition() {
         .find(|server| server.apps.claude)
         .expect("find official server")
         .id;
-    assert!(McpService::delete_server(&state, &official_storage_id)
-        .expect("delete official definition"));
+    assert!(!McpService::delete_server(&state, &official_storage_id)
+        .expect("official delete is an inert compatibility call"));
 
     assert!(
-        !McpService::get_servers(&state, AppType::Claude)
+        McpService::get_servers(&state, AppType::Claude)
             .expect("get official MCP servers")
             .contains_key("shared"),
-        "official definition should be removed"
+        "legacy official definition must remain readable"
     );
     assert_eq!(
         McpService::get_servers(&state, AppType::ClaudeCometix)
@@ -708,7 +813,11 @@ fn deleting_official_same_id_keeps_cometix_database_and_live_definition() {
     let cometix: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&cometix_path).expect("read Cometix MCP config"))
             .expect("parse Cometix MCP config");
-    assert!(official.pointer("/mcpServers/shared").is_none());
+    assert_eq!(
+        official.pointer("/mcpServers/shared/command"),
+        Some(&json!("official")),
+        "the private fork must not delete from official Claude live config"
+    );
     assert_eq!(
         cometix.pointer("/mcpServers/shared/command"),
         Some(&json!("cometix"))
@@ -894,12 +1003,17 @@ fn non_claude_projection_arbitrates_same_live_id_without_cross_row_deletion() {
 
 #[test]
 #[allow(deprecated)]
-fn editing_raw_official_row_to_cometix_only_removes_old_official_state() {
+fn editing_cometix_same_id_preserves_legacy_official_state() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
     fs::create_dir_all(home.join(".claude")).expect("create official Claude config dir");
     fs::create_dir_all(home.join(".hlclaude")).expect("create Cometix config dir");
+
+    let official_path = get_claude_mcp_path();
+    let official_original =
+        r#"{"mcpServers":{"foo":{"type":"stdio","command":"official-command"}}}"#;
+    fs::write(&official_path, official_original).expect("seed official MCP live config");
 
     let state = create_test_state().expect("create test state");
     let official = McpServer {
@@ -915,7 +1029,10 @@ fn editing_raw_official_row_to_cometix_only_removes_old_official_state() {
         docs: None,
         tags: Vec::new(),
     };
-    McpService::upsert_server(&state, official.clone()).expect("create official row");
+    state
+        .db
+        .save_mcp_server(&official)
+        .expect("seed legacy official row");
 
     let mut cometix_only = official;
     cometix_only.server = json!({ "type": "stdio", "command": "cometix-command" });
@@ -927,23 +1044,25 @@ fn editing_raw_official_row_to_cometix_only_removes_old_official_state() {
 
     let stored = state.db.get_all_mcp_servers().expect("get stored rows");
     assert!(
-        stored.get("foo").is_none_or(|row| !row.apps.claude),
-        "the raw official row must be deleted or disabled"
+        stored.get("foo").is_some_and(|row| row.apps.claude),
+        "the legacy official row must remain unchanged"
     );
-    assert!(!McpService::get_servers(&state, AppType::Claude)
-        .expect("get official MCP servers")
-        .contains_key("foo"));
+    assert_eq!(
+        McpService::get_servers(&state, AppType::Claude).expect("get official MCP servers")["foo"]
+            ["command"],
+        json!("official-command")
+    );
     assert_eq!(
         McpService::get_servers(&state, AppType::ClaudeCometix).expect("get Cometix MCP servers")
             ["foo"]["command"],
         json!("cometix-command")
     );
 
-    let official_live: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(get_claude_mcp_path()).expect("read official MCP live config"),
-    )
-    .expect("parse official MCP live config");
-    assert!(official_live.pointer("/mcpServers/foo").is_none());
+    assert_eq!(
+        fs::read_to_string(&official_path).expect("read official MCP live config"),
+        official_original,
+        "editing the Cometix sibling must not rewrite official Claude"
+    );
 }
 
 #[test]
@@ -1095,17 +1214,19 @@ fn import_from_all_apps_reports_broken_app_but_imports_the_rest() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    // 好的 ~/.claude.json：应正常导入
-    let claude_json = json!({
+    // 好的 ~/.hlclaude/.claude.json：应正常导入 Cometix
+    let cometix_json = json!({
         "mcpServers": {
             "alpha": { "type": "stdio", "command": "echo" }
         }
     });
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
     fs::write(
-        get_claude_mcp_path(),
-        serde_json::to_string_pretty(&claude_json).expect("serialize claude mcp"),
+        cometix_dir.join(".claude.json"),
+        serde_json::to_string_pretty(&cometix_json).expect("serialize Cometix MCP"),
     )
-    .expect("seed ~/.claude.json");
+    .expect("seed Cometix MCP config");
 
     // 坏的 ~/.codex/config.toml：解析必然失败
     let codex_dir = home.join(".codex");
@@ -1123,14 +1244,15 @@ fn import_from_all_apps_reports_broken_app_but_imports_the_rest() {
         "aggregated error should name the failing app, got: {message}"
     );
 
-    // Codex 的失败不阻断 Claude：alpha 应已入库并启用 Claude
+    // Codex 的失败不阻断 Cometix：alpha 应已入库并只启用 Cometix。
     let servers = state.db.get_all_mcp_servers().expect("get all mcp servers");
     let entry = servers
-        .get("alpha")
-        .expect("claude server imported despite codex failure");
+        .values()
+        .find(|server| server.apps.claude_cometix)
+        .expect("Cometix server imported despite Codex failure");
     assert!(
-        entry.apps.claude,
-        "imported server should have Claude app enabled"
+        entry.apps.claude_cometix && !entry.apps.claude,
+        "imported server should only have Cometix enabled"
     );
 }
 
@@ -1259,15 +1381,15 @@ fn enabling_codex_mcp_skips_when_codex_dir_missing() {
 }
 
 #[test]
-fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
+fn upsert_mcp_server_disabling_app_removes_from_cometix_live_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
 
-    // 模拟 Claude 已安装/已初始化：存在 ~/.claude 目录
-    fs::create_dir_all(home.join(".claude")).expect("create ~/.claude dir");
+    // 模拟 Cometix 已安装/已初始化：存在 ~/.hlclaude 目录
+    fs::create_dir_all(home.join(".hlclaude")).expect("create ~/.hlclaude dir");
 
-    // 先创建一个启用 Claude 的 MCP 服务器
+    // 先创建一个启用 Cometix 的 MCP 服务器
     let state = support::create_test_state().expect("create test state");
     McpService::upsert_server(
         &state,
@@ -1279,8 +1401,8 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
                 "command": "echo"
             }),
             apps: McpApps {
-                claude: true,
-                claude_cometix: false,
+                claude: false,
+                claude_cometix: true,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -1293,22 +1415,31 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
             tags: Vec::new(),
         },
     )
-    .expect("upsert should sync to Claude live config");
+    .expect("upsert should sync to Cometix live config");
 
-    // 确认已写入 ~/.claude.json
-    let mcp_path = get_claude_mcp_path();
-    let text = fs::read_to_string(&mcp_path).expect("read ~/.claude.json");
-    let v: serde_json::Value = serde_json::from_str(&text).expect("parse ~/.claude.json");
+    // 确认已写入 ~/.hlclaude/.claude.json
+    let mcp_path = home.join(".hlclaude").join(".claude.json");
+    let text = fs::read_to_string(&mcp_path).expect("read Cometix MCP config");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("parse Cometix MCP config");
     assert!(
         v.pointer("/mcpServers/echo").is_some(),
-        "echo should exist in Claude live config after enabling"
+        "echo should exist in Cometix live config after enabling"
     );
 
-    // 再次 upsert：取消勾选 Claude（apps.claude=false），应从 Claude live 配置中移除
+    let cometix_storage_id = state
+        .db
+        .get_all_mcp_servers()
+        .expect("read scoped Cometix row")
+        .into_values()
+        .find(|server| server.apps.claude_cometix)
+        .expect("find scoped Cometix row")
+        .id;
+
+    // 再次 upsert：取消勾选 Cometix，应从 Cometix live 配置中移除
     McpService::upsert_server(
         &state,
         McpServer {
-            id: "echo".to_string(),
+            id: cometix_storage_id,
             name: "echo".to_string(),
             server: json!({
                 "type": "stdio",
@@ -1329,13 +1460,13 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
             tags: Vec::new(),
         },
     )
-    .expect("upsert disabling app should remove from Claude live config");
+    .expect("upsert disabling app should remove from Cometix live config");
 
-    let text = fs::read_to_string(&mcp_path).expect("read ~/.claude.json after disable");
-    let v: serde_json::Value = serde_json::from_str(&text).expect("parse ~/.claude.json");
+    let text = fs::read_to_string(&mcp_path).expect("read Cometix MCP config after disable");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("parse Cometix MCP config");
     assert!(
         v.pointer("/mcpServers/echo").is_none(),
-        "echo should be removed from Claude live config after disabling"
+        "echo should be removed from Cometix live config after disabling"
     );
 }
 
@@ -1534,7 +1665,7 @@ fn enabling_claude_mcp_skips_when_claude_config_absent() {
 }
 
 #[test]
-fn explicit_default_claude_dir_keeps_default_split_mcp_path() {
+fn explicit_default_claude_dir_is_read_only_in_private_fork() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
@@ -1578,11 +1709,11 @@ fn explicit_default_claude_dir_keeps_default_split_mcp_path() {
             tags: Vec::new(),
         },
     )
-    .expect("sync default Claude MCP");
+    .expect("official Claude-only upsert is an inert compatibility call");
 
     assert!(
-        home.join(".claude.json").exists(),
-        "default split MCP file should be written at home/.claude.json"
+        !home.join(".claude.json").exists(),
+        "private fork must not create the official split MCP file"
     );
     assert!(
         !claude_dir.join(".claude.json").exists(),
@@ -1591,39 +1722,42 @@ fn explicit_default_claude_dir_keeps_default_split_mcp_path() {
 }
 
 #[test]
-fn custom_claude_dir_writes_mcp_inside_config_dir() {
+fn custom_cometix_dir_writes_mcp_inside_config_dir() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
-    let custom_dir = home.join("profiles").join(".claude");
-    fs::create_dir_all(&custom_dir).expect("create custom claude dir");
+    let custom_dir = home.join("profiles").join(".hlclaude");
+    fs::create_dir_all(&custom_dir).expect("create custom Cometix dir");
 
     update_settings(AppSettings {
-        claude_config_dir: Some(custom_dir.to_string_lossy().to_string()),
+        claude_cometix_config_dir: Some(custom_dir.to_string_lossy().to_string()),
         ..AppSettings::default()
     })
-    .expect("set custom claude config dir");
+    .expect("set custom Cometix config dir");
 
     let expected_mcp_path = custom_dir.join(".claude.json");
     assert_eq!(
-        get_claude_mcp_path(),
+        get_claude_cometix_settings_path()
+            .parent()
+            .expect("Cometix config parent")
+            .join(".claude.json"),
         expected_mcp_path,
-        "custom Claude dir should keep MCP state inside the config dir"
+        "custom Cometix dir should keep MCP state inside the config dir"
     );
 
     let state = create_test_state().expect("create test state");
     McpService::upsert_server(
         &state,
         McpServer {
-            id: "claude-custom".to_string(),
-            name: "Claude Custom".to_string(),
+            id: "cometix-custom".to_string(),
+            name: "Cometix Custom".to_string(),
             server: json!({
                 "type": "stdio",
                 "command": "echo"
             }),
             apps: McpApps {
-                claude: true,
-                claude_cometix: false,
+                claude: false,
+                claude_cometix: true,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -1636,20 +1770,20 @@ fn custom_claude_dir_writes_mcp_inside_config_dir() {
             tags: Vec::new(),
         },
     )
-    .expect("sync custom Claude MCP");
+    .expect("sync custom Cometix MCP");
 
     assert!(
         expected_mcp_path.exists(),
-        "custom Claude MCP file should be written inside custom dir"
+        "custom Cometix MCP file should be written inside custom dir"
     );
     assert!(
         !home.join("profiles").join(".claude.json").exists(),
-        "custom Claude dir should not write sibling .claude.json"
+        "custom Cometix dir should not write sibling .claude.json"
     );
 }
 
 #[test]
-fn custom_claude_dir_sync_does_not_copy_default_profile() {
+fn custom_cometix_dir_sync_does_not_copy_official_profile() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
@@ -1673,19 +1807,22 @@ fn custom_claude_dir_sync_does_not_copy_default_profile() {
         serde_json::to_string_pretty(&default_profile).expect("serialize default profile");
     fs::write(&home_mcp_path, &default_profile_text).expect("seed default Claude profile");
 
-    let custom_dir = home.join("profiles").join("work").join(".claude");
-    fs::create_dir_all(&custom_dir).expect("create custom claude dir");
+    let custom_dir = home.join("profiles").join("work").join(".hlclaude");
+    fs::create_dir_all(&custom_dir).expect("create custom Cometix dir");
     update_settings(AppSettings {
-        claude_config_dir: Some(custom_dir.to_string_lossy().to_string()),
+        claude_cometix_config_dir: Some(custom_dir.to_string_lossy().to_string()),
         ..AppSettings::default()
     })
-    .expect("set custom claude config dir");
+    .expect("set custom Cometix config dir");
 
     let expected_mcp_path = custom_dir.join(".claude.json");
     assert_eq!(
-        get_claude_mcp_path(),
+        get_claude_cometix_settings_path()
+            .parent()
+            .expect("Cometix config parent")
+            .join(".claude.json"),
         expected_mcp_path,
-        "custom Claude dir should use nested .claude.json"
+        "custom Cometix dir should use nested .claude.json"
     );
     assert!(
         !expected_mcp_path.exists(),
@@ -1703,8 +1840,8 @@ fn custom_claude_dir_sync_does_not_copy_default_profile() {
                 "command": "custom-command"
             }),
             apps: McpApps {
-                claude: true,
-                claude_cometix: false,
+                claude: false,
+                claude_cometix: true,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -1717,17 +1854,17 @@ fn custom_claude_dir_sync_does_not_copy_default_profile() {
             tags: Vec::new(),
         },
     )
-    .expect("sync custom Claude MCP");
+    .expect("sync custom Cometix MCP");
 
-    let text = fs::read_to_string(&expected_mcp_path).expect("read custom Claude MCP");
-    let value: serde_json::Value = serde_json::from_str(&text).expect("parse custom Claude MCP");
+    let text = fs::read_to_string(&expected_mcp_path).expect("read custom Cometix MCP");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("parse custom Cometix MCP");
     let servers = value
         .get("mcpServers")
         .and_then(|v| v.as_object())
         .expect("custom profile should contain mcpServers");
     assert!(
         servers.contains_key("custom-only"),
-        "custom profile should contain DB-managed Claude server"
+        "custom profile should contain DB-managed Cometix server"
     );
     assert!(
         !servers.contains_key("home-only"),
@@ -1748,7 +1885,7 @@ fn custom_claude_dir_sync_does_not_copy_default_profile() {
     assert_eq!(
         fs::read_to_string(&home_mcp_path).expect("reread default Claude profile"),
         default_profile_text,
-        "default Claude profile should remain unchanged"
+        "official Claude profile should remain unchanged"
     );
 }
 
@@ -1808,12 +1945,18 @@ fn custom_claude_dir_read_only_mcp_queries_do_not_create_profile() {
 }
 
 #[test]
-fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() {
+fn sync_all_enabled_reconciles_cometix_without_touching_official_claude() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
 
-    let mcp_path = get_claude_mcp_path();
+    let official_path = get_claude_mcp_path();
+    let official_original = r#"{"mcpServers":{"official-only":{"type":"stdio","command":"keep"}}}"#;
+    fs::write(&official_path, official_original).expect("seed official Claude MCP");
+
+    let cometix_dir = home.join(".hlclaude");
+    fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    let mcp_path = cometix_dir.join(".claude.json");
     fs::write(
         &mcp_path,
         serde_json::to_string_pretty(&json!({
@@ -1828,15 +1971,15 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
                 }
             }
         }))
-        .expect("serialize claude mcp"),
+        .expect("serialize Cometix mcp"),
     )
-    .expect("seed claude mcp");
+    .expect("seed Cometix mcp");
 
     let state = create_test_state().expect("create test state");
 
-    state
-        .db
-        .save_mcp_server(&McpServer {
+    McpService::upsert_server(
+        &state,
+        McpServer {
             id: "managed-disabled".to_string(),
             name: "Managed Disabled".to_string(),
             server: json!({
@@ -1845,7 +1988,7 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
             }),
             apps: McpApps {
                 claude: false,
-                claude_cometix: false,
+                claude_cometix: true,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -1856,8 +1999,21 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
             homepage: None,
             docs: None,
             tags: Vec::new(),
-        })
-        .expect("save disabled server");
+        },
+    )
+    .expect("create scoped Cometix server");
+    let mut disabled = state
+        .db
+        .get_all_mcp_servers()
+        .expect("get scoped Cometix server")
+        .into_values()
+        .find(|server| server.name == "Managed Disabled")
+        .expect("find scoped Cometix server");
+    disabled.apps.claude_cometix = false;
+    state
+        .db
+        .save_mcp_server(&disabled)
+        .expect("disable scoped Cometix server in database");
     state
         .db
         .save_mcp_server(&McpServer {
@@ -1868,8 +2024,8 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
                 "command": "managed"
             }),
             apps: McpApps {
-                claude: true,
-                claude_cometix: false,
+                claude: false,
+                claude_cometix: true,
                 codex: false,
                 gemini: false,
                 grokbuild: false,
@@ -1883,10 +2039,30 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
         })
         .expect("save enabled server");
 
+    // Recreate stale live state after database setup so sync_all_enabled must
+    // remove the known disabled Cometix entry while preserving unknown ones.
+    fs::write(
+        &mcp_path,
+        serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "managed-disabled": {
+                    "type": "stdio",
+                    "command": "echo"
+                },
+                "external-only": {
+                    "type": "stdio",
+                    "command": "external"
+                }
+            }
+        }))
+        .expect("serialize stale Cometix MCP"),
+    )
+    .expect("restore stale Cometix MCP");
+
     McpService::sync_all_enabled(&state).expect("reconcile mcp");
 
-    let text = fs::read_to_string(&mcp_path).expect("read claude mcp");
-    let value: serde_json::Value = serde_json::from_str(&text).expect("parse claude mcp");
+    let text = fs::read_to_string(&mcp_path).expect("read Cometix mcp");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("parse Cometix mcp");
     let servers = value
         .get("mcpServers")
         .and_then(|entry| entry.as_object())
@@ -1903,5 +2079,10 @@ fn sync_all_enabled_removes_known_disabled_but_preserves_unknown_live_entries() 
     assert!(
         servers.contains_key("external-only"),
         "live entries unknown to DB should be preserved"
+    );
+    assert_eq!(
+        fs::read_to_string(official_path).expect("read official Claude MCP"),
+        official_original,
+        "full MCP sync must preserve the official Claude live file"
     );
 }

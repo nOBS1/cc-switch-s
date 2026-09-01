@@ -1,6 +1,99 @@
 #![allow(non_snake_case)]
 
 use crate::session_manager;
+use crate::{app_config::AppType, fork_policy::ensure_app_management_allowed};
+
+const COMETIX_RESUME_PREFIX: &str = "hlclaude --resume ";
+
+fn canonical_single_quoted_argument(value: &str) -> bool {
+    if value.len() < 2 || !value.starts_with('\'') || !value.ends_with('\'') {
+        return false;
+    }
+
+    let inner = &value[1..value.len() - 1];
+    let decoded = inner.replace(r"'\''", "'");
+    session_manager::terminal::shell_escape(&decoded) == value
+}
+
+fn command_mentions_executable(command: &str, executable: &str) -> bool {
+    command.split_ascii_whitespace().any(|token| {
+        let token = token
+            .trim_matches(|character: char| {
+                matches!(character, '(' | ')' | ';' | '|' | '&' | '\'' | '"' | '`')
+            })
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        let basename = token.rsplit('/').next().unwrap_or(&token);
+        basename == executable
+            || ["exe", "cmd", "bat", "ps1"]
+                .iter()
+                .any(|extension| basename == format!("{executable}.{extension}"))
+    })
+}
+
+fn command_mentions_hlclaude_executable(command: &str) -> bool {
+    command_mentions_executable(command, "hlclaude")
+}
+
+fn command_mentions_official_claude_executable(command: &str) -> bool {
+    command_mentions_executable(command, "claude")
+}
+
+fn generated_cometix_resume_command(command: &str) -> Result<bool, String> {
+    if let Some(argument) = command.strip_prefix(COMETIX_RESUME_PREFIX) {
+        if canonical_single_quoted_argument(argument) {
+            return Ok(true);
+        }
+        return Err("无法确认 hlclaude 会话恢复命令，已拒绝启动".to_string());
+    }
+
+    // The backend-generated Cometix resume command has one exact shape. Do not
+    // let a lookalike skip the isolation check merely because it added a shell
+    // prefix, extra argument, or command separator.
+    if command_mentions_hlclaude_executable(command) {
+        return Err("无法确认 hlclaude 会话恢复命令，已拒绝启动".to_string());
+    }
+
+    Ok(false)
+}
+
+fn ensure_session_launch_allowed_with<FO, FC>(
+    provider_id: &str,
+    command: &str,
+    ensure_official: FO,
+    ensure_cometix: FC,
+) -> Result<(), String>
+where
+    FO: FnOnce() -> Result<(), String>,
+    FC: FnOnce() -> Result<(), String>,
+{
+    match provider_id {
+        "claude" => ensure_official(),
+        "claude-cometix" => {
+            if !generated_cometix_resume_command(command)? {
+                return Err("无法确认 hlclaude 会话恢复命令，已拒绝启动".to_string());
+            }
+            ensure_cometix()
+        }
+        _ => {
+            if command_mentions_official_claude_executable(command)
+                || command_mentions_hlclaude_executable(command)
+            {
+                return Err("会话提供方与 Claude 恢复命令不匹配，已拒绝启动".to_string());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn ensure_session_launch_allowed(provider_id: &str, command: &str) -> Result<(), String> {
+    ensure_session_launch_allowed_with(
+        provider_id,
+        command,
+        || ensure_app_management_allowed(&AppType::Claude).map_err(|error| error.to_string()),
+        crate::commands::misc::ensure_cometix_runtime_preflight,
+    )
+}
 
 #[tauri::command]
 pub async fn list_sessions() -> Result<Vec<session_manager::SessionMeta>, String> {
@@ -26,7 +119,7 @@ pub async fn get_session_messages(
 
 /// 在用户选定的终端里恢复一个会话。
 ///
-/// # 安全边界：`command` 是刻意不加校验的
+/// # 安全边界：非 Claude 的普通 `command` 仍沿用可信 renderer 边界
 ///
 /// 本命令接受 renderer 传来的任意字符串并最终交给 shell。多份外部审计把这一点
 /// 报成"IPC 任意命令执行"，这里明确记录为**已知并接受的风险**，而不是待修缺陷。
@@ -58,12 +151,21 @@ pub async fn get_session_messages(
 /// 相比之下 `cwd` 的处理**不属于**这条豁免：它是磁盘上扫来的项目路径，正常使用
 /// 就可能含 `$(...)`，与 renderer 是否可信无关，因此在
 /// `session_manager::terminal::shell_escape` 里做了完整的单引号转义。
+///
+/// 官方 Claude 历史仅供读取；`providerId = claude` 始终走私有版的
+/// `AppType::Claude` 管理禁令，其他 provider 也不能夹带 Claude 命令绕过。
+///
+/// Cometix 会话恢复是例外：后端只接受自身生成的
+/// `hlclaude --resume '<session-id>'` 形态，并在真正启动终端前重新检查
+/// `.hlclaude` 整棵配置树；无法确认形态或隔离状态时均拒绝启动。
 #[tauri::command]
 pub async fn launch_session_terminal(
+    providerId: String,
     command: String,
     cwd: Option<String>,
     custom_config: Option<String>,
 ) -> Result<bool, String> {
+    let provider_id = providerId.clone();
     let command = command.clone();
     let cwd = cwd.clone();
     let custom_config = custom_config.clone();
@@ -79,6 +181,7 @@ pub async fn launch_session_terminal(
     };
 
     tauri::async_runtime::spawn_blocking(move || {
+        ensure_session_launch_allowed(&provider_id, &command)?;
         session_manager::terminal::launch_terminal(
             &target,
             &command,
@@ -90,6 +193,93 @@ pub async fn launch_session_terminal(
     .map_err(|e| format!("Failed to launch terminal: {e}"))??;
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn generated_cometix_resume_runs_the_isolation_guard() {
+        let called = Cell::new(false);
+        ensure_session_launch_allowed_with(
+            "claude-cometix",
+            "hlclaude --resume 'session-123'",
+            || Err("official guard must not run".to_string()),
+            || {
+                called.set(true);
+                Ok(())
+            },
+        )
+        .expect("allow isolated Cometix resume");
+
+        assert!(called.get());
+    }
+
+    #[test]
+    fn generated_cometix_resume_accepts_canonical_shell_escaping() {
+        let session_id = "session-'$(touch /tmp/never)'";
+        let command = format!(
+            "hlclaude --resume {}",
+            session_manager::terminal::shell_escape(session_id)
+        );
+
+        assert!(generated_cometix_resume_command(&command).expect("classify generated command"));
+    }
+
+    #[test]
+    fn malformed_hlclaude_resume_fails_closed_before_the_guard() {
+        for command in [
+            "hlclaude --resume session-123",
+            "hlclaude --resume 'session-123' --dangerous",
+            "env CLAUDE_CONFIG_DIR=~/.claude hlclaude --resume 'session-123'",
+        ] {
+            let called = Cell::new(false);
+            assert!(ensure_session_launch_allowed_with(
+                "claude-cometix",
+                command,
+                || Err("official guard must not run".to_string()),
+                || {
+                    called.set(true);
+                    Ok(())
+                },
+            )
+            .is_err());
+            assert!(!called.get());
+        }
+    }
+
+    #[test]
+    fn official_claude_resume_is_rejected() {
+        let called = Cell::new(false);
+        let result = ensure_session_launch_allowed_with(
+            "claude",
+            "claude --resume 'session-123'",
+            || {
+                called.set(true);
+                Err("official Claude is read-only".to_string())
+            },
+            || Err("Cometix guard must not run".to_string()),
+        );
+
+        assert!(result.is_err());
+        assert!(called.get());
+    }
+
+    #[test]
+    fn provider_mismatch_cannot_bypass_claude_resume_guards() {
+        for command in [
+            "claude --resume 'session-123'",
+            "C:\\tools\\Claude.CMD --resume 'session-123'",
+            "hlclaude --resume 'session-123'",
+        ] {
+            assert!(
+                ensure_session_launch_allowed_with("codex", command, || Ok(()), || Ok(()),)
+                    .is_err()
+            );
+        }
+    }
 }
 
 #[tauri::command]

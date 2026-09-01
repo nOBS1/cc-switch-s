@@ -27,12 +27,14 @@ pub async fn read_claude_mcp_config() -> Result<Option<String>, String> {
 /// 新增或更新一个 MCP 服务器条目
 #[tauri::command]
 pub async fn upsert_claude_mcp_server(id: String, spec: serde_json::Value) -> Result<bool, String> {
+    ensure_app_management_allowed(&AppType::Claude).map_err(|e| e.to_string())?;
     claude_mcp::upsert_mcp_server(&id, spec).map_err(|e| e.to_string())
 }
 
 /// 删除一个 MCP 服务器条目
 #[tauri::command]
 pub async fn delete_claude_mcp_server(id: String) -> Result<bool, String> {
+    ensure_app_management_allowed(&AppType::Claude).map_err(|e| e.to_string())?;
     claude_mcp::delete_mcp_server(&id).map_err(|e| e.to_string())
 }
 
@@ -204,4 +206,22 @@ pub async fn toggle_mcp_app(
 #[tauri::command]
 pub async fn import_mcp_from_apps(state: State<'_, AppState>) -> Result<usize, String> {
     McpService::import_from_all_apps(&state).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_claude_mcp_server, upsert_claude_mcp_server};
+
+    #[tokio::test]
+    async fn private_fork_rejects_explicit_legacy_claude_mcp_mutations() {
+        let upsert_error = upsert_claude_mcp_server(String::new(), serde_json::Value::Null)
+            .await
+            .expect_err("legacy official Claude MCP upsert must be disabled");
+        assert!(upsert_error.contains("official CC Switch"));
+
+        let delete_error = delete_claude_mcp_server(String::new())
+            .await
+            .expect_err("legacy official Claude MCP delete must be disabled");
+        assert!(delete_error.contains("official CC Switch"));
+    }
 }

@@ -208,6 +208,7 @@ fn normalize_file(mut file: ModelPricingFile) -> Result<ModelPricingFile, AppErr
 
 fn read_file_unlocked() -> Result<Option<ModelPricingFile>, AppError> {
     let path = model_pricing_file_path();
+    crate::app_store::ensure_private_app_data_path_isolated(&path)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -218,6 +219,7 @@ fn read_file_unlocked() -> Result<Option<ModelPricingFile>, AppError> {
 
 fn write_file_unlocked(file: &ModelPricingFile) -> Result<(), AppError> {
     let path = model_pricing_file_path();
+    crate::app_store::ensure_private_app_data_path_isolated(&path)?;
     let mut data = serde_json::to_vec_pretty(file)
         .map_err(|error| AppError::Config(format!("序列化模型定价配置失败: {error}")))?;
     data.push(b'\n');

@@ -99,6 +99,7 @@ impl Database {
     /// 数据库文件位于 `~/.cc-switch-cometix/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
         let db_path = get_app_config_dir().join("cc-switch.db");
+        crate::app_store::ensure_private_app_data_path_isolated(&db_path)?;
         let db_exists = db_path.exists();
 
         // 确保父目录存在
@@ -174,6 +175,7 @@ impl Database {
     pub fn stored_user_version_exceeds_supported(
         db_path: &std::path::Path,
     ) -> Result<Option<i32>, AppError> {
+        crate::app_store::ensure_private_app_data_path_isolated(db_path)?;
         if !db_path.exists() {
             return Ok(None);
         }

@@ -10,7 +10,9 @@ import type {
   InstalledSkill,
   SkillBackupEntry,
   SkillUpdateInfo,
+  UnmanagedSkill,
 } from "@/lib/api/skills";
+import type { AppId } from "@/lib/api/types";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -48,14 +50,15 @@ const { toastErrorMock, toastSuccessMock, toastWarningMock } = vi.hoisted(
 let installedSkillsMock: InstalledSkill[] = [];
 let skillBackupsMock: SkillBackupEntry[] = [];
 let skillUpdatesMock: SkillUpdateInfo[] = [];
+let unmanagedSkillsMock: UnmanagedSkill[] = [];
 let checkUpdatesFetching = false;
 let toggleSkillAppPending = false;
 let toggleSkillAppVariables:
-  | { id: string; app: "claude"; enabled: boolean }
+  | { id: string; app: AppId; enabled: boolean }
   | undefined;
 let bulkToggleSkillAppPending = false;
 let bulkToggleSkillAppVariables:
-  | { ids: string[]; app: "claude"; enabled: boolean }
+  | { ids: string[]; app: AppId; enabled: boolean }
   | undefined;
 
 vi.mock("sonner", () => ({
@@ -99,15 +102,7 @@ vi.mock("@/hooks/useSkills", () => ({
     mutateAsync: uninstallSkillMock,
   }),
   useScanUnmanagedSkills: () => ({
-    data: [
-      {
-        directory: "shared-skill",
-        name: "Shared Skill",
-        description: "Imported from Grok Build",
-        foundIn: ["grokbuild"],
-        path: "/tmp/shared-skill",
-      },
-    ],
+    data: unmanagedSkillsMock,
     refetch: scanUnmanagedMock,
   }),
   useImportSkillsFromApps: () => ({
@@ -162,13 +157,27 @@ const makeInstalledSkill = (
 };
 
 const renderPanel = () =>
-  render(<UnifiedSkillsPanel onOpenDiscovery={() => {}} currentApp="claude" />);
+  render(
+    <UnifiedSkillsPanel
+      onOpenDiscovery={() => {}}
+      currentApp="claude-cometix"
+    />,
+  );
 
 describe("UnifiedSkillsPanel", () => {
   beforeEach(() => {
     installedSkillsMock = [];
     skillBackupsMock = [];
     skillUpdatesMock = [];
+    unmanagedSkillsMock = [
+      {
+        directory: "shared-skill",
+        name: "Shared Skill",
+        description: "Imported from Grok Build",
+        foundIn: ["grokbuild"],
+        path: "/tmp/shared-skill",
+      },
+    ];
     checkUpdatesFetching = false;
     toggleSkillAppPending = false;
     toggleSkillAppVariables = undefined;
@@ -215,7 +224,7 @@ describe("UnifiedSkillsPanel", () => {
       <UnifiedSkillsPanel
         ref={ref}
         onOpenDiscovery={() => {}}
-        currentApp="claude"
+        currentApp="claude-cometix"
       />,
     );
 
@@ -238,6 +247,54 @@ describe("UnifiedSkillsPanel", () => {
         {
           directory: "shared-skill",
           apps: expect.objectContaining({ grokbuild: true }),
+        },
+      ]);
+    });
+  });
+
+  it("imports only into Cometix when a discovered Skill also exists in official Claude", async () => {
+    unmanagedSkillsMock = [
+      {
+        directory: "claude-skill",
+        name: "Claude Skill",
+        foundIn: ["claude", "claude-cometix"],
+        path: "/tmp/claude-skill",
+      },
+    ];
+    scanUnmanagedMock.mockResolvedValue({ data: unmanagedSkillsMock });
+    const ref = createRef<UnifiedSkillsPanelHandle>();
+
+    render(
+      <UnifiedSkillsPanel
+        ref={ref}
+        onOpenDiscovery={() => {}}
+        currentApp="claude-cometix"
+      />,
+    );
+
+    await act(async () => {
+      await ref.current?.openImport();
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "Claude" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Claude Code (Cometix)" }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    await act(async () => {
+      screen.getByText("skills.importSelected").click();
+    });
+
+    await waitFor(() => {
+      expect(importSkillsMock).toHaveBeenCalledWith([
+        {
+          directory: "claude-skill",
+          apps: expect.objectContaining({
+            claude: false,
+            "claude-cometix": true,
+          }),
         },
       ]);
     });
@@ -357,7 +414,10 @@ describe("UnifiedSkillsPanel", () => {
 
     installedSkillsMock = [makeInstalledSkill()];
     rerender(
-      <UnifiedSkillsPanel onOpenDiscovery={() => {}} currentApp="claude" />,
+      <UnifiedSkillsPanel
+        onOpenDiscovery={() => {}}
+        currentApp="claude-cometix"
+      />,
     );
     const user = userEvent.setup();
     await user.type(
@@ -393,7 +453,7 @@ describe("UnifiedSkillsPanel", () => {
       makeInstalledSkill({
         id: "enabled-id",
         name: "Visible Skill",
-        apps: { claude: true },
+        apps: { codex: true },
       }),
       makeInstalledSkill({ id: "disabled-id-1", name: "Hidden Skill One" }),
       makeInstalledSkill({ id: "disabled-id-2", name: "Hidden Skill Two" }),
@@ -411,12 +471,12 @@ describe("UnifiedSkillsPanel", () => {
       }),
       "Visible Skill",
     );
-    await user.click(screen.getByText("Claude:").closest("button")!);
+    await user.click(screen.getByText("Codex:").closest("button")!);
 
     await waitFor(() => {
       expect(bulkToggleSkillAppMock).toHaveBeenCalledWith({
         ids: ["disabled-id-1", "disabled-id-2"],
-        app: "claude",
+        app: "codex",
         enabled: true,
       });
     });
@@ -439,7 +499,9 @@ describe("UnifiedSkillsPanel", () => {
     });
     renderPanel();
 
-    expect(screen.getAllByRole("button", { name: "Claude" })).toHaveLength(1);
+    expect(
+      screen.queryByRole("button", { name: "Claude" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: "Claude Code (Cometix)" }),
     ).toHaveLength(1);
@@ -458,6 +520,49 @@ describe("UnifiedSkillsPanel", () => {
     });
   });
 
+  it("hides official-only legacy Skills and excludes them from bulk updates", async () => {
+    installedSkillsMock = [
+      makeInstalledSkill({
+        id: "legacy:official-only",
+        name: "Official Only Skill",
+        apps: { claude: true },
+      }),
+      makeInstalledSkill({
+        id: "managed:cometix",
+        name: "Managed Cometix Skill",
+        apps: { "claude-cometix": true },
+      }),
+    ];
+    skillUpdatesMock = [
+      {
+        id: "legacy:official-only",
+        name: "Official Only Skill",
+        remoteHash: "official-new",
+      },
+      {
+        id: "managed:cometix",
+        name: "Managed Cometix Skill",
+        remoteHash: "managed-new",
+      },
+    ];
+
+    renderPanel();
+
+    expect(screen.queryByText("Official Only Skill")).not.toBeInTheDocument();
+    expect(screen.getByText("Managed Cometix Skill")).toBeInTheDocument();
+
+    await userEvent.setup().click(
+      screen.getByRole("button", {
+        name: "skills.updateAll",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(updateSkillMock).toHaveBeenCalledTimes(1);
+      expect(updateSkillMock).toHaveBeenCalledWith("managed:cometix");
+    });
+  });
+
   it("enables all Skills when none are enabled for an app", async () => {
     installedSkillsMock = [
       makeInstalledSkill({ id: "first-id" }),
@@ -466,12 +571,12 @@ describe("UnifiedSkillsPanel", () => {
     renderPanel();
 
     const user = userEvent.setup();
-    await user.click(screen.getByText("Claude:").closest("button")!);
+    await user.click(screen.getByText("Codex:").closest("button")!);
 
     await waitFor(() => {
       expect(bulkToggleSkillAppMock).toHaveBeenCalledWith({
         ids: ["first-id", "second-id"],
-        app: "claude",
+        app: "codex",
         enabled: true,
       });
     });
@@ -479,18 +584,18 @@ describe("UnifiedSkillsPanel", () => {
 
   it("disables all Skills when every Skill is enabled for an app", async () => {
     installedSkillsMock = [
-      makeInstalledSkill({ id: "first-id", apps: { claude: true } }),
-      makeInstalledSkill({ id: "second-id", apps: { claude: true } }),
+      makeInstalledSkill({ id: "first-id", apps: { codex: true } }),
+      makeInstalledSkill({ id: "second-id", apps: { codex: true } }),
     ];
     renderPanel();
 
     const user = userEvent.setup();
-    await user.click(screen.getByText("Claude:").closest("button")!);
+    await user.click(screen.getByText("Codex:").closest("button")!);
 
     await waitFor(() => {
       expect(bulkToggleSkillAppMock).toHaveBeenCalledWith({
         ids: ["first-id", "second-id"],
-        app: "claude",
+        app: "codex",
         enabled: false,
       });
     });
@@ -508,7 +613,7 @@ describe("UnifiedSkillsPanel", () => {
     renderPanel();
 
     const user = userEvent.setup();
-    await user.click(screen.getByText("Claude:").closest("button")!);
+    await user.click(screen.getByText("Codex:").closest("button")!);
 
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith("common.bulkToggleFailed", {
@@ -525,14 +630,14 @@ describe("UnifiedSkillsPanel", () => {
         toggleSkillAppPending = true;
         toggleSkillAppVariables = {
           id: "owner/repo:alpha-skill",
-          app: "claude",
+          app: "codex",
           enabled: true,
         };
       } else {
         bulkToggleSkillAppPending = true;
         bulkToggleSkillAppVariables = {
           ids: ["owner/repo:alpha-skill"],
-          app: "claude",
+          app: "codex",
           enabled: true,
         };
       }
@@ -541,9 +646,9 @@ describe("UnifiedSkillsPanel", () => {
       const row = screen.getByText("Alpha Skill").closest(".group");
       const appToggleButtons = Array.from(
         row!.querySelectorAll<HTMLButtonElement>("button"),
-      ).slice(0, 7);
+      ).slice(0, 6);
 
-      expect(appToggleButtons).toHaveLength(7);
+      expect(appToggleButtons).toHaveLength(6);
       appToggleButtons.forEach((button) => expect(button).toBeDisabled());
       expect(screen.getByTitle("skills.uninstall")).toBeDisabled();
       await userEvent.setup().click(appToggleButtons[0]);
@@ -558,7 +663,7 @@ describe("UnifiedSkillsPanel", () => {
     const { unmount } = render(
       <UnifiedSkillsPanel
         onOpenDiscovery={() => {}}
-        currentApp="claude"
+        currentApp="claude-cometix"
         onCheckUpdatesStateChange={onCheckUpdatesStateChange}
       />,
     );
@@ -592,7 +697,7 @@ describe("UnifiedSkillsPanel", () => {
       <UnifiedSkillsPanel
         ref={ref}
         onOpenDiscovery={() => {}}
-        currentApp="claude"
+        currentApp="claude-cometix"
       />,
     );
 
@@ -619,7 +724,7 @@ describe("UnifiedSkillsPanel", () => {
       <UnifiedSkillsPanel
         ref={ref}
         onOpenDiscovery={() => {}}
-        currentApp="claude"
+        currentApp="claude-cometix"
         onInteractionBlockedChange={onInteractionBlockedChange}
         onNavigationBlockedChange={onNavigationBlockedChange}
       />,
@@ -629,7 +734,7 @@ describe("UnifiedSkillsPanel", () => {
       expect(onInteractionBlockedChange).toHaveBeenLastCalledWith(true);
       expect(onNavigationBlockedChange).toHaveBeenLastCalledWith(false);
     });
-    expect(screen.getByText("Claude:").closest("button")).toBeDisabled();
+    expect(screen.getByText("Codex:").closest("button")).toBeDisabled();
     expect(screen.getByTitle("skills.uninstall")).toBeDisabled();
 
     await act(async () => {
@@ -645,7 +750,7 @@ describe("UnifiedSkillsPanel", () => {
       <UnifiedSkillsPanel
         ref={ref}
         onOpenDiscovery={() => {}}
-        currentApp="claude"
+        currentApp="claude-cometix"
       />,
     );
 
@@ -677,7 +782,7 @@ describe("UnifiedSkillsPanel", () => {
       <UnifiedSkillsPanel
         ref={ref}
         onOpenDiscovery={() => {}}
-        currentApp="claude"
+        currentApp="claude-cometix"
       />,
     );
 
@@ -692,7 +797,7 @@ describe("UnifiedSkillsPanel", () => {
     await userEvent.setup().click(screen.getByTitle("skills.uninstall"));
     await userEvent
       .setup()
-      .click(screen.getByText("Claude:").closest("button")!);
+      .click(screen.getByText("Codex:").closest("button")!);
 
     expect(scanUnmanagedMock).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -747,7 +852,7 @@ describe("UnifiedSkillsPanel", () => {
       <UnifiedSkillsPanel
         ref={ref}
         onOpenDiscovery={() => {}}
-        currentApp="claude"
+        currentApp="claude-cometix"
       />,
     );
 
@@ -811,7 +916,7 @@ describe("UnifiedSkillsPanel", () => {
       <UnifiedSkillsPanel
         ref={ref}
         onOpenDiscovery={() => {}}
-        currentApp="claude"
+        currentApp="claude-cometix"
       />,
     );
 
@@ -881,7 +986,7 @@ describe("UnifiedSkillsPanel", () => {
         id: "skill-1",
         name: "Claude Skill",
         directory: "claude-skill",
-        apps: { claude: true, pi: false },
+        apps: { codex: true, pi: false },
       }),
     ];
 
@@ -897,17 +1002,25 @@ describe("UnifiedSkillsPanel", () => {
     installedSkillsMock = [
       makeInstalledSkill({
         name: "Claude Skill",
-        apps: { claude: true, pi: false },
+        apps: { codex: true, pi: false },
       }),
     ];
 
     render(
-      <UnifiedSkillsPanel onOpenDiscovery={() => {}} currentApp="claude" />,
+      <UnifiedSkillsPanel
+        onOpenDiscovery={() => {}}
+        currentApp="claude-cometix"
+      />,
     );
 
     expect(
       screen.queryByRole("button", { name: "Pi" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Claude" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Claude" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Claude Code (Cometix)" }),
+    ).toBeInTheDocument();
   });
 });

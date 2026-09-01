@@ -415,6 +415,7 @@ impl Database {
         if interval_hours > 0 {
             let backup_file_guard = lock_backup_file_operations()?;
             let backup_dir = get_app_config_dir().join("backups");
+            crate::app_store::ensure_private_app_data_path_isolated(&backup_dir)?;
             if !backup_dir.exists() {
                 self.backup_database_file_locked(&backup_file_guard)?;
             } else {
@@ -511,6 +512,7 @@ impl Database {
         F: FnOnce(&Path, &Path) -> Result<(), AppError>,
     {
         let db_path = get_app_config_dir().join("cc-switch.db");
+        crate::app_store::ensure_private_app_data_path_isolated(&db_path)?;
         if !db_path.exists() {
             return Ok(None);
         }
@@ -519,6 +521,7 @@ impl Database {
             .parent()
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
+        crate::app_store::ensure_private_app_data_path_isolated(&backup_dir)?;
 
         fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
@@ -965,6 +968,7 @@ impl Database {
     pub fn list_backups() -> Result<Vec<BackupEntry>, AppError> {
         let _backup_file_guard = lock_backup_file_operations()?;
         let backup_dir = get_app_config_dir().join("backups");
+        crate::app_store::ensure_private_app_data_path_isolated(&backup_dir)?;
         if !backup_dir.exists() {
             return Ok(vec![]);
         }
@@ -1024,7 +1028,9 @@ impl Database {
 
         let backup_file_guard = lock_backup_file_operations()?;
         let backup_dir = get_app_config_dir().join("backups");
+        crate::app_store::ensure_private_app_data_path_isolated(&backup_dir)?;
         let backup_path = backup_dir.join(filename);
+        crate::app_store::ensure_private_app_data_path_isolated(&backup_path)?;
 
         if !backup_path.exists() {
             return Err(AppError::InvalidInput(format!(
@@ -1131,8 +1137,11 @@ impl Database {
 
         let _backup_file_guard = lock_backup_file_operations()?;
         let backup_dir = get_app_config_dir().join("backups");
+        crate::app_store::ensure_private_app_data_path_isolated(&backup_dir)?;
         let old_path = backup_dir.join(old_filename);
         let new_path = backup_dir.join(&new_filename);
+        crate::app_store::ensure_private_app_data_path_isolated(&old_path)?;
+        crate::app_store::ensure_private_app_data_path_isolated(&new_path)?;
 
         if !old_path.exists() {
             return Err(AppError::InvalidInput(format!(
@@ -1166,6 +1175,7 @@ impl Database {
 
         let _backup_file_guard = lock_backup_file_operations()?;
         let backup_path = get_app_config_dir().join("backups").join(filename);
+        crate::app_store::ensure_private_app_data_path_isolated(&backup_path)?;
         if !backup_path.exists() {
             return Err(AppError::InvalidInput(format!(
                 "Backup file not found: {filename}"

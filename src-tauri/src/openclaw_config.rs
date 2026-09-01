@@ -384,6 +384,7 @@ fn write_root_section(section: &str, value: &Value) -> Result<OpenClawWriteOutco
 
 fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
     let backup_dir = get_app_config_dir().join("backups").join("openclaw");
+    crate::app_store::ensure_private_app_data_path_isolated(&backup_dir)?;
     fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
     let base_id = format!("openclaw_{}", Local::now().format("%Y%m%d_%H%M%S"));
@@ -397,12 +398,14 @@ fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
         counter += 1;
     }
 
+    crate::app_store::ensure_private_app_data_path_isolated(&backup_path)?;
     atomic_write(&backup_path, source.as_bytes())?;
     cleanup_openclaw_backups(&backup_dir)?;
     Ok(backup_path)
 }
 
 fn cleanup_openclaw_backups(dir: &Path) -> Result<(), AppError> {
+    crate::app_store::ensure_private_app_data_path_isolated(dir)?;
     let retain = effective_backup_retain_count();
     let mut entries = fs::read_dir(dir)
         .map_err(|e| AppError::io(dir, e))?
@@ -423,6 +426,7 @@ fn cleanup_openclaw_backups(dir: &Path) -> Result<(), AppError> {
     entries.sort_by_key(|entry| entry.metadata().and_then(|m| m.modified()).ok());
     let remove_count = entries.len().saturating_sub(retain);
     for entry in entries.into_iter().take(remove_count) {
+        crate::app_store::ensure_private_app_data_path_isolated(&entry.path())?;
         if let Err(err) = fs::remove_file(entry.path()) {
             log::warn!(
                 "Failed to remove old OpenClaw config backup {}: {err}",

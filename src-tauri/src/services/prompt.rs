@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::app_config::AppType;
 use crate::config::write_text_file;
@@ -18,6 +18,15 @@ fn get_unix_timestamp() -> Result<i64, AppError> {
 }
 
 pub struct PromptService;
+
+fn managed_prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
+    crate::fork_policy::ensure_app_management_allowed(app)?;
+    let path = prompt_file_path(app)?;
+    if matches!(app, AppType::ClaudeCometix) {
+        crate::fork_policy::ensure_cometix_managed_config_path_isolated(&path)?;
+    }
+    Ok(path)
+}
 
 fn project_prompt_set_to_path(
     prompts: &IndexMap<String, Prompt>,
@@ -72,6 +81,8 @@ impl PromptService {
             return upsert_pi_prompt(state, id, prompt);
         }
 
+        let target_path = managed_prompt_file_path(&app)?;
+
         // 检查是否为已启用的提示词
         let is_enabled = prompt.enabled;
 
@@ -79,7 +90,6 @@ impl PromptService {
 
         if is_enabled {
             // 启用提示词：写入内容到文件
-            let target_path = prompt_file_path(&app)?;
             write_text_file(&target_path, &prompt.content)?;
         } else {
             // 禁用提示词：检查是否还有其他已启用的提示词
@@ -88,7 +98,6 @@ impl PromptService {
 
             if !any_enabled {
                 // 所有提示词都已禁用，清空文件
-                let target_path = prompt_file_path(&app)?;
                 if target_path.exists() {
                     write_text_file(&target_path, "")?;
                 }
@@ -102,6 +111,7 @@ impl PromptService {
         if matches!(app, AppType::Pi) {
             return delete_pi_prompt(state, id);
         }
+        crate::fork_policy::ensure_app_management_allowed(&app)?;
         let prompts = Self::get_prompts(state, app.clone())?;
 
         if let Some(prompt) = prompts.get(id) {
@@ -120,7 +130,7 @@ impl PromptService {
         }
 
         // 回填当前 live 文件内容到已启用的提示词，或创建备份
-        let target_path = prompt_file_path(&app)?;
+        let target_path = managed_prompt_file_path(&app)?;
         if target_path.exists() {
             if let Ok(live_content) = std::fs::read_to_string(&target_path) {
                 if !live_content.trim().is_empty() {
@@ -198,7 +208,7 @@ impl PromptService {
                 .content
                 .ok_or_else(|| AppError::Message("提示词文件不存在".to_string()))?
         } else {
-            let file_path = prompt_file_path(&app)?;
+            let file_path = managed_prompt_file_path(&app)?;
             if !file_path.exists() {
                 return Err(AppError::Message("提示词文件不存在".to_string()));
             }
@@ -229,6 +239,9 @@ impl PromptService {
             return Ok(PiAgentsFileGuard::acquire()?.read()?.content);
         }
         let file_path = prompt_file_path(&app)?;
+        if matches!(app, AppType::ClaudeCometix) {
+            crate::fork_policy::ensure_cometix_managed_config_path_isolated(&file_path)?;
+        }
         if !file_path.exists() {
             return Ok(None);
         }
@@ -242,6 +255,10 @@ impl PromptService {
     /// This deliberately does not call `enable_prompt`: restore paths must not
     /// read stale live content and write it back into the freshly imported DB.
     pub fn sync_to_live(state: &AppState, app: AppType) -> Result<(), AppError> {
+        if !crate::fork_policy::app_management_allowed(&app) {
+            return Ok(());
+        }
+
         // Pi derives activation from its native AGENTS.md; its persisted prompt
         // rows are intentionally disabled and must not drive generic projection.
         if matches!(app, AppType::ClaudeDesktop | AppType::Pi) {
@@ -249,7 +266,7 @@ impl PromptService {
         }
 
         let prompts = state.db.get_prompts(app.as_str())?;
-        let target_path = prompt_file_path(&app)?;
+        let target_path = managed_prompt_file_path(&app)?;
         if let Some(warning) = project_prompt_set_to_path(&prompts, &target_path)? {
             return Err(AppError::Message(warning));
         }
@@ -291,7 +308,11 @@ impl PromptService {
             return Ok(0);
         }
 
-        let file_path = prompt_file_path(&app)?;
+        let file_path = if matches!(app, AppType::Pi) {
+            prompt_file_path(&app)?
+        } else {
+            managed_prompt_file_path(&app)?
+        };
 
         // 读取文件内容。Pi 与交互式管理路径共用限长读取和协调锁。
         let content = if matches!(app, AppType::Pi) {
@@ -490,10 +511,48 @@ fn delete_pi_prompt(state: &AppState, id: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::project_prompt_set_to_path;
+    use super::{managed_prompt_file_path, project_prompt_set_to_path, PromptService};
+    use crate::app_config::AppType;
+    use crate::database::Database;
     use crate::prompt::Prompt;
+    use crate::prompt_files::prompt_file_path;
+    use crate::store::AppState;
     use indexmap::IndexMap;
+    use serial_test::serial;
+    use std::path::Path;
+    use std::sync::Arc;
     use tempfile::tempdir;
+
+    struct TestHomeGuard(Option<std::ffi::OsString>);
+
+    impl TestHomeGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", path);
+            crate::settings::reload_settings().expect("reload isolated settings");
+            Self(previous)
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = crate::settings::reload_settings();
+        }
+    }
+
+    #[cfg(unix)]
+    fn alias_file(source: &Path, destination: &Path) -> bool {
+        std::os::unix::fs::symlink(source, destination).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn alias_file(source: &Path, destination: &Path) -> bool {
+        std::os::windows::fs::symlink_file(source, destination).is_ok()
+    }
 
     fn prompt(id: &str, content: &str, enabled: bool) -> Prompt {
         Prompt {
@@ -557,6 +616,60 @@ mod tests {
             std::fs::read_to_string(path).expect("read prompt"),
             "first body"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn private_fork_prompt_sync_preserves_official_claude_file() {
+        let home = tempdir().expect("temp home");
+        let _guard = TestHomeGuard::set(home.path());
+        let state = AppState::new(Arc::new(
+            Database::memory().expect("create in-memory database"),
+        ));
+        state
+            .db
+            .save_prompt(
+                AppType::Claude.as_str(),
+                &prompt("managed", "managed content", true),
+            )
+            .expect("save managed prompt");
+
+        let path = prompt_file_path(&AppType::Claude).expect("official Claude prompt path");
+        std::fs::create_dir_all(path.parent().expect("prompt parent")).expect("create prompt dir");
+        std::fs::write(&path, "official sentinel").expect("seed official prompt");
+
+        PromptService::sync_to_live(&state, AppType::Claude).expect("sync prompts");
+
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read official prompt"),
+            "official sentinel"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cometix_prompt_path_rejects_an_inner_alias_to_official_claude() {
+        let home = tempdir().expect("temp home");
+        let _guard = TestHomeGuard::set(home.path());
+        let official = home.path().join(".claude");
+        let cometix = home.path().join(".hlclaude");
+        std::fs::create_dir_all(&official).expect("create official root");
+        std::fs::create_dir_all(&cometix).expect("create Cometix root");
+
+        let official_prompt = official.join("CLAUDE.md");
+        let cometix_prompt = cometix.join("CLAUDE.md");
+        std::fs::write(&official_prompt, "official sentinel").expect("seed official prompt");
+        // Windows file symlinks require Developer Mode or elevation. The
+        // directory-junction behavior is covered centrally in fork_policy; on
+        // hosts that allow a file link, prove the exact prompt target too.
+        if !alias_file(&official_prompt, &cometix_prompt) {
+            return;
+        }
+
+        assert!(managed_prompt_file_path(&AppType::ClaudeCometix).is_err());
+
+        #[cfg(windows)]
+        std::fs::remove_file(&cometix_prompt).expect("remove test symlink");
     }
 }
 

@@ -46,11 +46,44 @@ fn rotated_crash_log_path(path: &Path, index: usize) -> PathBuf {
     PathBuf::from(rotated)
 }
 
+fn private_path_guard(path: &Path) -> std::io::Result<()> {
+    crate::app_store::ensure_private_app_data_path_isolated(path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("拒绝不安全的崩溃日志路径 {}: {error}", path.display()),
+        )
+    })
+}
+
+fn guard_crash_log_family(path: &Path, archives_to_keep: usize) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        private_path_guard(parent)?;
+    }
+    private_path_guard(path)?;
+    for index in 1..=archives_to_keep {
+        private_path_guard(&rotated_crash_log_path(path, index))?;
+    }
+    Ok(())
+}
+
+fn prepare_crash_log_parent(path: &Path) -> std::io::Result<()> {
+    guard_crash_log_family(path, CRASH_LOG_ARCHIVES_TO_KEEP)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        // Re-resolve after creation: a pre-existing parent component may be a
+        // symlink/junction, or the directory may have changed concurrently.
+        private_path_guard(parent)?;
+    }
+    guard_crash_log_family(path, CRASH_LOG_ARCHIVES_TO_KEEP)
+}
+
 fn rotate_crash_log_if_needed_with_limit(
     path: &Path,
     max_size: u64,
     archives_to_keep: usize,
 ) -> std::io::Result<()> {
+    guard_crash_log_family(path, archives_to_keep)?;
+    private_path_guard(path)?;
     let size = match fs::metadata(path) {
         Ok(metadata) => metadata.len(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -66,14 +99,19 @@ fn rotate_crash_log_if_needed_with_limit(
         } else {
             rotated_crash_log_path(path, index - 1)
         };
+        private_path_guard(&source)?;
         if !source.exists() {
             continue;
         }
 
         let destination = rotated_crash_log_path(path, index);
+        private_path_guard(&destination)?;
         if destination.exists() {
+            private_path_guard(&destination)?;
             fs::remove_file(&destination)?;
         }
+        private_path_guard(&source)?;
+        private_path_guard(&destination)?;
         fs::rename(source, destination)?;
     }
 
@@ -134,10 +172,10 @@ pub fn setup_panic_hook() {
     panic::set_hook(Box::new(move |panic_info| {
         let log_path = get_crash_log_path();
 
-        // 确保目录存在
-        if let Some(parent) = log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+        // Guard both the directory and every final/rotated file before any
+        // filesystem mutation. Failure only disables file persistence; the
+        // report is still emitted to stderr and the default hook still runs.
+        let persistence_ready = prepare_crash_log_parent(&log_path).is_ok();
 
         // 构建崩溃信息（使用 catch_unwind 保护时间格式化，避免嵌套 panic）
         let timestamp = std::panic::catch_unwind(|| {
@@ -218,15 +256,26 @@ Stack Trace (Backtrace)
         let crash_log_guard = CRASH_LOG_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = rotate_crash_log_if_needed(&log_path);
-        let saved =
+        let saved = if persistence_ready
+            && rotate_crash_log_if_needed(&log_path).is_ok()
+            && private_path_guard(&log_path).is_ok()
+        {
             if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-                let _ = file.write_all(crash_entry.as_bytes());
-                let _ = file.flush();
-                true
+                // Recheck immediately before each write. This catches a
+                // symlink/junction or hard-link swap between open and append.
+                if private_path_guard(&log_path).is_ok() {
+                    let wrote = file.write_all(crash_entry.as_bytes()).is_ok();
+                    let flushed = file.flush().is_ok();
+                    wrote && flushed
+                } else {
+                    false
+                }
             } else {
                 false
-            };
+            }
+        } else {
+            false
+        };
         drop(crash_log_guard);
 
         if saved {
@@ -245,6 +294,43 @@ Stack Trace (Backtrace)
 mod tests {
     use super::*;
 
+    struct TestHomeGuard(Option<std::ffi::OsString>);
+
+    impl TestHomeGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        std::os::unix::fs::symlink(source, destination).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(source, destination).is_ok() {
+            return true;
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(destination)
+            .arg(source)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
     #[test]
     fn test_crash_log_path() {
         let path = get_crash_log_path();
@@ -261,9 +347,13 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn crash_log_rotation_keeps_bounded_archives() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("crash.log");
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = TestHomeGuard::set(home.path());
+        let dir = home.path().join(".cc-switch-cometix");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("crash.log");
 
         fs::write(&path, b"first").unwrap();
         rotate_crash_log_if_needed_with_limit(&path, 4, 2).unwrap();
@@ -295,5 +385,65 @@ mod tests {
             b"second"
         );
         assert!(!rotated_crash_log_path(&path, 3).exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn crash_log_rotation_rejects_private_root_alias_to_upstream_data() {
+        let home = tempfile::tempdir().expect("temp home");
+        let _home_guard = TestHomeGuard::set(home.path());
+        let upstream_root = home.path().join(".cc-switch");
+        let private_alias = home.path().join(".cc-switch-cometix");
+        std::fs::create_dir_all(&upstream_root).expect("create upstream root");
+        assert!(
+            alias_directory(&upstream_root, &private_alias),
+            "create private-root alias"
+        );
+
+        let upstream_log = upstream_root.join("crash.log");
+        std::fs::write(&upstream_log, b"official crash sentinel").expect("write upstream sentinel");
+
+        let result = rotate_crash_log_if_needed_with_limit(&private_alias.join("crash.log"), 1, 2);
+        let sentinel_untouched =
+            std::fs::read(&upstream_log).ok() == Some(b"official crash sentinel".to_vec());
+        let archive_created = upstream_root.join("crash.log.1").exists();
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&private_alias).expect("remove test junction");
+
+        assert!(
+            result.is_err(),
+            "unsafe crash-log rotation must be rejected"
+        );
+        assert!(
+            sentinel_untouched,
+            "upstream crash log must remain untouched"
+        );
+        assert!(!archive_created, "upstream archive must not be created");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn crash_log_rotation_rejects_active_log_hardlink_to_upstream_database() {
+        let home = tempfile::tempdir().expect("temp home");
+        let _home_guard = TestHomeGuard::set(home.path());
+        let upstream_root = home.path().join(".cc-switch");
+        let private_root = home.path().join(".cc-switch-cometix");
+        std::fs::create_dir_all(&upstream_root).expect("create upstream root");
+        std::fs::create_dir_all(&private_root).expect("create private root");
+        let upstream_db = upstream_root.join("cc-switch.db");
+        let crash_log = private_root.join("crash.log");
+        std::fs::write(&upstream_db, b"official database sentinel")
+            .expect("write upstream database");
+        std::fs::hard_link(&upstream_db, &crash_log).expect("create crash-log hardlink");
+
+        let result = rotate_crash_log_if_needed_with_limit(&crash_log, 1, 2);
+
+        assert!(result.is_err(), "unsafe crash-log target must be rejected");
+        assert_eq!(
+            std::fs::read(&upstream_db).expect("read upstream database"),
+            b"official database sentinel"
+        );
+        assert!(!private_root.join("crash.log.1").exists());
     }
 }

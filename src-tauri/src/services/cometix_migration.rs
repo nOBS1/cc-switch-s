@@ -27,11 +27,25 @@ pub struct CometixAuxiliaryMigrationOutcome {
 
 pub fn migrate_legacy_cometix_auxiliary_assets(
 ) -> Result<CometixAuxiliaryMigrationOutcome, AppError> {
+    crate::fork_policy::ensure_app_management_allowed(&crate::app_config::AppType::ClaudeCometix)?;
     let home = crate::config::get_home_dir();
+    let target_dir = crate::config::get_claude_cometix_config_dir();
+    for target in [
+        target_dir.join(".claude.json"),
+        target_dir.join("CLAUDE.md"),
+        target_dir.join("skills"),
+    ] {
+        crate::fork_policy::ensure_cometix_managed_config_path_isolated(&target)?;
+    }
+    let marker_root = crate::config::get_app_config_dir();
+    crate::app_store::ensure_private_app_data_path_isolated(&auxiliary_migration_marker_path(
+        &marker_root,
+        &target_dir,
+    ))?;
     migrate_legacy_cometix_auxiliary_assets_once_at(
         &home.join(".claude-cometix"),
-        &crate::config::get_claude_cometix_config_dir(),
-        &crate::config::get_app_config_dir(),
+        &target_dir,
+        &marker_root,
     )
 }
 
@@ -285,6 +299,104 @@ pub(crate) fn migrate_legacy_cometix_auxiliary_assets_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+
+    struct TestHome {
+        _dir: tempfile::TempDir,
+        original_test_home: Option<OsString>,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp home");
+            let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            crate::settings::reload_settings().expect("reload isolated settings");
+            Self {
+                _dir: dir,
+                original_test_home,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self._dir.path()
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match &self.original_test_home {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = crate::settings::reload_settings();
+        }
+    }
+
+    #[cfg(unix)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        std::os::unix::fs::symlink(source, destination).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn alias_directory(source: &Path, destination: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(source, destination).is_ok() {
+            return true;
+        }
+
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(destination)
+            .arg(source)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    #[serial]
+    fn production_auxiliary_migration_rejects_cometix_alias_to_official_claude() {
+        let home = TestHome::new();
+        let official = home.path().join(".claude");
+        let cometix = home.path().join(".hlclaude");
+        let legacy = home.path().join(".claude-cometix");
+        fs::create_dir_all(&official).expect("official Claude dir");
+        fs::create_dir_all(&legacy).expect("legacy Cometix dir");
+        assert!(
+            alias_directory(&official, &cometix),
+            "create Cometix alias to official Claude"
+        );
+
+        write_json_file(
+            &official.join(".claude.json"),
+            &serde_json::json!({
+                "mcpServers": {"official": {"command": "official"}}
+            }),
+        )
+        .expect("official MCP sentinel");
+        write_json_file(
+            &legacy.join(".claude.json"),
+            &serde_json::json!({
+                "mcpServers": {"legacy": {"command": "legacy"}}
+            }),
+        )
+        .expect("legacy MCP source");
+
+        migrate_legacy_cometix_auxiliary_assets()
+            .expect_err("production migration must reject an alias to official Claude");
+
+        let official_after: Value =
+            read_json_file(&official.join(".claude.json")).expect("read official MCP sentinel");
+        assert_eq!(
+            official_after,
+            serde_json::json!({
+                "mcpServers": {"official": {"command": "official"}}
+            })
+        );
+
+        #[cfg(windows)]
+        fs::remove_dir(&cometix).expect("remove test junction");
+    }
 
     #[test]
     fn failed_auxiliary_migration_does_not_write_completion_marker() {

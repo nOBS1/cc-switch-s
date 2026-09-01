@@ -559,6 +559,8 @@ impl Default for SkillService {
 }
 
 impl SkillService {
+    const PRIVATE_MANAGED_SKILL_ID_PREFIX: &'static str = "cc-switch-scope:v1:private-managed:";
+
     pub fn new() -> Self {
         Self
     }
@@ -602,33 +604,431 @@ impl SkillService {
 
     // ========== 路径管理 ==========
 
+    fn unified_ssot_dir() -> PathBuf {
+        crate::config::get_home_dir().join(".agents").join("skills")
+    }
+
+    fn unified_ssot_protected_roots() -> Vec<PathBuf> {
+        let home = crate::config::get_home_dir();
+        let mut roots = vec![
+            crate::config::get_claude_config_dir(),
+            home.join(".claude"),
+            home.join(".claude.json"),
+            home.join(".claude-desktop"),
+            home.join(".cc-switch"),
+            crate::config::get_app_config_dir(),
+            home.join(crate::config::APP_CONFIG_DIR_NAME),
+            crate::config::get_claude_cometix_config_dir(),
+            home.join(".hlclaude"),
+        ];
+        if let Ok(desktop_roots) = crate::claude_desktop_config::get_protected_config_roots() {
+            roots.extend(desktop_roots);
+        }
+        roots
+    }
+
+    fn unified_ssot_conflict(path: &Path, reason: &str) -> anyhow::Error {
+        anyhow!(
+            "Unified Skill 存储路径不安全，已拒绝修改 {} ({reason})",
+            path.display()
+        )
+    }
+
+    #[cfg(windows)]
+    fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+
+    #[cfg(not(windows))]
+    fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+        metadata.file_type().is_symlink()
+    }
+
+    #[cfg(unix)]
+    fn metadata_has_multiple_links(_path: &Path, metadata: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        metadata.is_file() && metadata.nlink() > 1
+    }
+
+    #[cfg(windows)]
+    fn metadata_has_multiple_links(path: &Path, metadata: &fs::Metadata) -> bool {
+        metadata.is_file() && crate::app_store::existing_file_has_multiple_links(path)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn metadata_has_multiple_links(_path: &Path, _metadata: &fs::Metadata) -> bool {
+        false
+    }
+
+    fn ensure_unified_ssot_tree_isolated_inner(
+        root: &Path,
+        directory: &Path,
+        protected_roots: &[PathBuf],
+    ) -> Result<()> {
+        let entries = fs::read_dir(directory).with_context(|| {
+            format!(
+                "failed to inspect Unified Skill storage {}",
+                directory.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to inspect Unified Skill storage {}",
+                    directory.display()
+                )
+            })?;
+            let path = entry.path();
+            if !crate::app_store::path_is_same_or_nested(&path, root)
+                || protected_roots
+                    .iter()
+                    .any(|protected| crate::app_store::paths_overlap(&path, protected))
+            {
+                return Err(Self::unified_ssot_conflict(
+                    &path,
+                    "路径解析到受保护的应用数据",
+                ));
+            }
+
+            let metadata = fs::symlink_metadata(&path).with_context(|| {
+                format!("failed to inspect Unified Skill path {}", path.display())
+            })?;
+            if Self::metadata_is_link_or_reparse(&metadata) {
+                return Err(Self::unified_ssot_conflict(
+                    &path,
+                    "目录树中包含符号链接或联接",
+                ));
+            }
+            if Self::metadata_has_multiple_links(&path, &metadata) {
+                return Err(Self::unified_ssot_conflict(
+                    &path,
+                    "目录树中包含多重硬链接文件",
+                ));
+            }
+            if metadata.is_dir() {
+                Self::ensure_unified_ssot_tree_isolated_inner(root, &path, protected_roots)?;
+            } else if !metadata.is_file() {
+                return Err(Self::unified_ssot_conflict(
+                    &path,
+                    "目录树中包含不受支持的文件类型",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_plain_tree_for_unified_storage(directory: &Path) -> Result<()> {
+        let metadata = fs::symlink_metadata(directory).with_context(|| {
+            format!(
+                "failed to inspect Unified Skill source {}",
+                directory.display()
+            )
+        })?;
+        if Self::metadata_is_link_or_reparse(&metadata) {
+            return Err(Self::unified_ssot_conflict(
+                directory,
+                "源目录是符号链接或联接",
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(Self::unified_ssot_conflict(directory, "源路径不是目录"));
+        }
+        Self::ensure_unified_ssot_tree_isolated_inner(directory, directory, &[])
+    }
+
+    /// `~/.agents/skills` is a user-selectable SSOT and therefore a direct
+    /// mutation surface. Validate both its lexical parents and every existing
+    /// entry before any create/copy/rename/delete so a junction, symlink, or
+    /// hard link cannot redirect private-build writes into official data.
+    fn ensure_unified_ssot_path_isolated(path: &Path) -> Result<()> {
+        let root = Self::unified_ssot_dir();
+        if !crate::app_store::path_is_same_or_nested(path, &root) {
+            return Err(Self::unified_ssot_conflict(
+                path,
+                "目标不在 Unified Skill 存储目录内",
+            ));
+        }
+
+        let protected_roots = Self::unified_ssot_protected_roots();
+        if protected_roots
+            .iter()
+            .any(|protected| crate::app_store::paths_overlap(&root, protected))
+            || protected_roots
+                .iter()
+                .any(|protected| crate::app_store::paths_overlap(path, protected))
+        {
+            return Err(Self::unified_ssot_conflict(
+                path,
+                "与官方 Claude、Claude Desktop 或 CC Switch 应用数据重合",
+            ));
+        }
+
+        // Do not trust an otherwise-safe canonical result when the lexical
+        // `.agents` or `skills` component itself is a reparse point. The tree
+        // must have one stable owner, not merely happen to resolve somewhere
+        // unprotected at the instant of this check.
+        for component in [crate::config::get_home_dir().join(".agents"), root.clone()] {
+            match fs::symlink_metadata(&component) {
+                Ok(metadata) if Self::metadata_is_link_or_reparse(&metadata) => {
+                    return Err(Self::unified_ssot_conflict(
+                        &component,
+                        "Unified Skill 存储根包含符号链接或联接",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to inspect Unified Skill root {}",
+                            component.display()
+                        )
+                    });
+                }
+            }
+        }
+
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.is_dir() => {
+                Self::ensure_unified_ssot_tree_isolated_inner(&root, &root, &protected_roots)
+            }
+            Ok(_) => Err(Self::unified_ssot_conflict(
+                &root,
+                "Unified Skill 存储根不是目录",
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!("failed to inspect Unified Skill root {}", root.display())
+            }),
+        }
+    }
+
+    fn ensure_current_unified_ssot_path_isolated(path: &Path) -> Result<()> {
+        if matches!(
+            crate::settings::get_skill_storage_location(),
+            SkillStorageLocation::Unified
+        ) {
+            Self::ensure_unified_ssot_path_isolated(path)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_current_unified_source_tree_isolated(source: &Path) -> Result<()> {
+        if matches!(
+            crate::settings::get_skill_storage_location(),
+            SkillStorageLocation::Unified
+        ) {
+            Self::ensure_plain_tree_for_unified_storage(source)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_storage_path_isolated_for(location: SkillStorageLocation, path: &Path) -> Result<()> {
+        match location {
+            SkillStorageLocation::CcSwitch => {
+                crate::app_store::ensure_private_app_data_path_isolated(path)
+                    .map_err(anyhow::Error::from)
+            }
+            SkillStorageLocation::Unified => Self::ensure_unified_ssot_path_isolated(path),
+        }
+    }
+
     /// 获取 SSOT 目录（根据设置返回 ~/.cc-switch-cometix/skills/ 或 ~/.agents/skills/）
     pub fn get_ssot_dir() -> Result<PathBuf> {
         let location = crate::settings::get_skill_storage_location();
         let dir = match location {
             SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
-            SkillStorageLocation::Unified => {
-                crate::config::get_home_dir().join(".agents").join("skills")
-            }
+            SkillStorageLocation::Unified => Self::unified_ssot_dir(),
         };
+        if matches!(location, SkillStorageLocation::CcSwitch) {
+            crate::app_store::ensure_private_app_data_path_isolated(&dir)?;
+        } else {
+            Self::ensure_unified_ssot_path_isolated(&dir)?;
+        }
         fs::create_dir_all(&dir)?;
+        if matches!(location, SkillStorageLocation::Unified) {
+            Self::ensure_unified_ssot_path_isolated(&dir)?;
+        }
         Ok(dir)
     }
 
     fn get_scoped_ssot_dir(scope: ClaudeSkillScope) -> Result<PathBuf> {
         let dir = Self::get_ssot_dir()?.join(".scopes").join(scope.dir_name());
+        if matches!(
+            crate::settings::get_skill_storage_location(),
+            SkillStorageLocation::CcSwitch
+        ) {
+            crate::app_store::ensure_private_app_data_path_isolated(&dir)?;
+        } else {
+            Self::ensure_unified_ssot_path_isolated(&dir)?;
+        }
         fs::create_dir_all(&dir)?;
+        Self::ensure_current_unified_ssot_path_isolated(&dir)?;
         Ok(dir)
     }
 
+    fn get_private_managed_ssot_dir() -> Result<PathBuf> {
+        let dir = Self::get_ssot_dir()?
+            .join(".scopes")
+            .join("private-managed");
+        if matches!(
+            crate::settings::get_skill_storage_location(),
+            SkillStorageLocation::CcSwitch
+        ) {
+            crate::app_store::ensure_private_app_data_path_isolated(&dir)?;
+        } else {
+            Self::ensure_unified_ssot_path_isolated(&dir)?;
+        }
+        fs::create_dir_all(&dir)?;
+        Self::ensure_current_unified_ssot_path_isolated(&dir)?;
+        Ok(dir)
+    }
+
+    fn is_private_managed_skill(skill: &InstalledSkill) -> bool {
+        skill.id.starts_with(Self::PRIVATE_MANAGED_SKILL_ID_PREFIX)
+    }
+
+    fn private_managed_skill_id(id: &str) -> String {
+        let base = id
+            .strip_prefix(ClaudeSkillScope::OFFICIAL_ID_PREFIX)
+            .or_else(|| id.strip_prefix(Self::PRIVATE_MANAGED_SKILL_ID_PREFIX))
+            .unwrap_or(id);
+        format!("{}{base}", Self::PRIVATE_MANAGED_SKILL_ID_PREFIX)
+    }
+
+    fn skill_ssot_relative_dir(skill: &InstalledSkill) -> Option<PathBuf> {
+        if Self::is_private_managed_skill(skill) {
+            return Some(PathBuf::from(".scopes").join("private-managed"));
+        }
+        ClaudeSkillScope::from_id(&skill.id)
+            .map(|scope| PathBuf::from(".scopes").join(scope.dir_name()))
+    }
+
     fn get_skill_ssot_dir(skill: &InstalledSkill) -> Result<PathBuf> {
+        if Self::is_private_managed_skill(skill) {
+            return Self::get_private_managed_ssot_dir();
+        }
         match ClaudeSkillScope::from_id(&skill.id) {
             Some(scope) => Self::get_scoped_ssot_dir(scope),
             None => Self::get_ssot_dir(),
         }
     }
 
+    fn has_private_fork_managed_app(skill: &InstalledSkill) -> bool {
+        skill
+            .apps
+            .enabled_apps()
+            .iter()
+            .any(crate::fork_policy::app_management_allowed)
+    }
+
+    fn ensure_private_fork_manages_skill(skill: &InstalledSkill) -> Result<()> {
+        if Self::has_private_fork_managed_app(skill) {
+            return Ok(());
+        }
+
+        crate::fork_policy::ensure_app_management_allowed(&AppType::Claude)
+            .map_err(anyhow::Error::new)
+    }
+
+    /// Legacy rows may share one SSOT directory between official Claude and
+    /// apps managed by this private fork. Before a destructive managed
+    /// operation, copy that source into a private scope and leave the original
+    /// row/source untouched for the existing official Claude symlink.
+    fn isolate_managed_apps_from_official_source(
+        db: &Arc<Database>,
+        skill: &InstalledSkill,
+    ) -> Result<InstalledSkill> {
+        let owns_official_source = skill.apps.claude
+            && !Self::is_private_managed_skill(skill)
+            && !matches!(
+                ClaudeSkillScope::from_id(&skill.id),
+                Some(ClaudeSkillScope::Cometix)
+            );
+        if !owns_official_source || !Self::has_private_fork_managed_app(skill) {
+            return Ok(skill.clone());
+        }
+
+        let directory = Self::require_valid_directory(&skill.directory)?;
+        let managed_id = Self::private_managed_skill_id(&skill.id);
+        if let Some(existing) = db.get_installed_skill(&managed_id)? {
+            if existing.directory != skill.directory {
+                return Err(anyhow!(
+                    "Managed Skill isolation ID collision: {managed_id}"
+                ));
+            }
+            let official_apps = SkillApps {
+                claude: true,
+                ..Default::default()
+            };
+            if !db.update_skill_apps(&skill.id, &official_apps)? {
+                return Err(anyhow!("Skill no longer installed: {}", skill.id));
+            }
+            return Ok(existing);
+        }
+
+        let source = Self::get_skill_ssot_dir(skill)?.join(&directory);
+        if !source.exists() {
+            return Err(anyhow!(
+                "Cannot isolate managed Skill because its shared source is missing: {}",
+                source.display()
+            ));
+        }
+
+        let managed_root = Self::get_private_managed_ssot_dir()?;
+        let managed_source = managed_root.join(&directory);
+        if managed_source.exists() || Self::is_symlink(&managed_source) {
+            return Err(anyhow!(
+                "Managed Skill isolation target already exists: {}",
+                managed_source.display()
+            ));
+        }
+        Self::ensure_current_unified_ssot_path_isolated(&managed_source)?;
+        Self::ensure_current_unified_source_tree_isolated(&source)?;
+        Self::copy_dir_recursive(&source, &managed_source)?;
+
+        let mut managed_skill = skill.clone();
+        managed_skill.id = managed_id;
+        managed_skill.apps.claude = false;
+        managed_skill.content_hash = Self::compute_dir_hash(&managed_source).ok();
+
+        if let Err(error) = db.save_skill(&managed_skill) {
+            if Self::ensure_current_unified_ssot_path_isolated(&managed_source).is_ok() {
+                let _ = fs::remove_dir_all(&managed_source);
+            }
+            return Err(error.into());
+        }
+
+        let official_apps = SkillApps {
+            claude: true,
+            ..Default::default()
+        };
+        match db.update_skill_apps(&skill.id, &official_apps) {
+            Ok(true) => Ok(managed_skill),
+            Ok(false) => {
+                let _ = db.delete_skill(&managed_skill.id);
+                if Self::ensure_current_unified_ssot_path_isolated(&managed_source).is_ok() {
+                    let _ = fs::remove_dir_all(&managed_source);
+                }
+                Err(anyhow!("Skill no longer installed: {}", skill.id))
+            }
+            Err(error) => {
+                let _ = db.delete_skill(&managed_skill.id);
+                if Self::ensure_current_unified_ssot_path_isolated(&managed_source).is_ok() {
+                    let _ = fs::remove_dir_all(&managed_source);
+                }
+                Err(error.into())
+            }
+        }
+    }
+
     fn scope_owns_app(skill: &InstalledSkill, app: &AppType) -> bool {
+        if Self::is_private_managed_skill(skill) {
+            return crate::fork_policy::app_management_allowed(app);
+        }
         match (
             ClaudeSkillScope::from_id(&skill.id),
             ClaudeSkillScope::for_app(app),
@@ -639,6 +1039,9 @@ impl SkillService {
     }
 
     fn scope_matches_app(skill: &InstalledSkill, app: &AppType) -> bool {
+        if Self::is_private_managed_skill(skill) {
+            return crate::fork_policy::app_management_allowed(app);
+        }
         match ClaudeSkillScope::for_app(app) {
             Some(app_scope) => match ClaudeSkillScope::from_id(&skill.id) {
                 Some(skill_scope) => skill_scope == app_scope,
@@ -687,6 +1090,7 @@ impl SkillService {
     /// 获取 Skill 卸载备份目录（~/.cc-switch-cometix/skill-backups/）
     fn get_backup_dir() -> Result<PathBuf> {
         let dir = get_app_config_dir().join("skill-backups");
+        crate::app_store::ensure_private_app_data_path_isolated(&dir)?;
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
@@ -742,7 +1146,7 @@ impl SkillService {
         // 走 Known Folder API，测试无法隔离真实用户目录。
         let home = crate::config::get_home_dir();
 
-        Ok(match app {
+        let app_dir = match app {
             AppType::Claude => home.join(".claude").join("skills"),
             AppType::ClaudeCometix => crate::config::get_claude_cometix_config_dir().join("skills"),
             AppType::ClaudeDesktop => home.join(".claude-desktop").join("skills"),
@@ -753,7 +1157,19 @@ impl SkillService {
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
             AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
             AppType::Pi => crate::pi_config::get_pi_agent_dir()?.join("skills"),
-        })
+        };
+
+        Self::ensure_private_fork_skill_app_dir_isolated(app, &app_dir)?;
+        Ok(app_dir)
+    }
+
+    fn ensure_private_fork_skill_app_dir_isolated(app: &AppType, app_dir: &Path) -> Result<()> {
+        if !matches!(app, AppType::ClaudeCometix) {
+            return Ok(());
+        }
+
+        crate::fork_policy::ensure_cometix_managed_config_path_isolated(app_dir)
+            .map_err(anyhow::Error::from)
     }
 
     fn paths_alias(left: &Path, right: &Path) -> bool {
@@ -809,10 +1225,7 @@ impl SkillService {
     }
 
     fn validate_skill_storage_destination(ssot_dir: &Path) -> Result<()> {
-        for app in AppType::all() {
-            if matches!(app, AppType::ClaudeDesktop) {
-                continue;
-            }
+        for app in AppType::all().filter(crate::fork_policy::app_management_allowed) {
             let app_dir = Self::get_app_skills_dir(&app)?;
             Self::ensure_distinct_skill_roots(ssot_dir, &app_dir, &app)?;
         }
@@ -868,7 +1281,7 @@ impl SkillService {
                     skill.apps.claude_cometix,
                 ),
             ] {
-                if !enabled {
+                if !enabled || !crate::fork_policy::app_management_allowed(&app) {
                     continue;
                 }
 
@@ -886,8 +1299,11 @@ impl SkillService {
                     };
 
                     if dest.exists() || Self::is_symlink(&dest) {
+                        Self::ensure_current_unified_ssot_path_isolated(&dest)?;
                         Self::remove_path(&dest)?;
                     }
+                    Self::ensure_current_unified_ssot_path_isolated(&dest)?;
+                    Self::ensure_current_unified_source_tree_isolated(&source)?;
                     Self::copy_dir_recursive(&source, &dest)?;
                 }
 
@@ -1136,6 +1552,8 @@ impl SkillService {
                 .map(|(_, source)| source)
                 .ok_or_else(|| anyhow!("Skill directory changed during install; please retry"))?;
             Self::preflight_install_destination(source, &install_name, current_app)?;
+            Self::ensure_current_unified_ssot_path_isolated(&dest)?;
+            Self::ensure_current_unified_source_tree_isolated(source)?;
             Self::copy_dir_recursive(source, &dest)?;
         }
 
@@ -1188,9 +1606,12 @@ impl SkillService {
         let _state_guard = skill_state_write_guard();
 
         // 获取 skill 信息
-        let skill = db
+        let mut skill = db
             .get_installed_skill(id)?
             .ok_or_else(|| anyhow!("Skill not found: {id}"))?;
+        skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+        Self::ensure_private_fork_manages_skill(&skill)?;
+        let skill = Self::isolate_managed_apps_from_official_source(db, &skill)?;
 
         // DB 行可能被同步导入污染（远端快照 raw SQL 直接灌库，绕过安装期校验），
         // 也可能是 v3.11.0 引入 sanitize_install_name 之前留下的存量脏值
@@ -1269,7 +1690,12 @@ impl SkillService {
                     // Cometix live directory (and vice versa). Legacy rows keep
                     // the upstream all-app cleanup behavior.
                     if ClaudeSkillScope::from_id(&skill.id).is_some() {
-                        for app in skill.apps.enabled_apps() {
+                        for app in skill
+                            .apps
+                            .enabled_apps()
+                            .into_iter()
+                            .filter(crate::fork_policy::app_management_allowed)
+                        {
                             if !matches!(app, AppType::Pi) && Self::scope_owns_app(&skill, &app) {
                                 let _ = Self::remove_from_app_preserving(
                                     &directory,
@@ -1279,7 +1705,8 @@ impl SkillService {
                             }
                         }
                     } else {
-                        for app in AppType::all() {
+                        for app in AppType::all().filter(crate::fork_policy::app_management_allowed)
+                        {
                             if matches!(app, AppType::Pi) {
                                 continue;
                             }
@@ -1299,6 +1726,7 @@ impl SkillService {
                     if overlaps_preserved_pi {
                         log::warn!("Skill {id} 的 SSOT 路径与保留的 Pi 副本重叠，跳过文件删除");
                     } else if skill_path.exists() {
+                        Self::ensure_current_unified_ssot_path_isolated(&skill_path)?;
                         fs::remove_dir_all(&skill_path)?;
                     }
                     (backup_path, preserved_pi_path, pi_cleanup_incomplete)
@@ -1313,7 +1741,7 @@ impl SkillService {
             };
 
         // 从数据库删除
-        db.delete_skill(id)?;
+        db.delete_skill(&skill.id)?;
 
         log::info!(
             "Skill {} 卸载成功{}",
@@ -1607,6 +2035,7 @@ impl SkillService {
             .get_installed_skill(skill_id)?
             .ok_or_else(|| anyhow!("Skill not found: {skill_id}"))?;
         skill.apps.pi = Self::skill_exists_in_app(&skill.directory, &AppType::Pi);
+        Self::ensure_private_fork_manages_skill(&skill)?;
 
         // 本函数后续三种危险操作都用 directory 拼路径：备份源（把任意目录复制进
         // 备份区并在界面列出）、remove_dir_all（删任意目录）、copy_dir_recursive
@@ -1631,11 +2060,6 @@ impl SkillService {
             branch: branch.clone(),
             enabled: true,
         };
-
-        let ssot_dir = Self::get_skill_ssot_dir(&skill)?;
-        if skill.apps.pi {
-            Self::get_distinct_app_skills_dir(&ssot_dir, &AppType::Pi)?;
-        }
 
         // 下载仓库
         let (temp_guard, used_branch) = timeout(
@@ -1700,7 +2124,12 @@ impl SkillService {
         }
         Self::require_valid_directory(&current_skill.directory)?;
         current_skill.apps.pi = Self::skill_exists_in_app(&current_skill.directory, &AppType::Pi);
-        let skill = current_skill;
+        Self::ensure_private_fork_manages_skill(&current_skill)?;
+        let skill = Self::isolate_managed_apps_from_official_source(db, &current_skill)?;
+        let ssot_dir = Self::get_skill_ssot_dir(&skill)?;
+        if skill.apps.pi {
+            Self::get_distinct_app_skills_dir(&ssot_dir, &AppType::Pi)?;
+        }
 
         let dest = ssot_dir.join(&skill.directory);
         let pi_deployment = if skill.apps.pi {
@@ -1716,8 +2145,11 @@ impl SkillService {
 
         // 删除旧 SSOT 目录并复制新文件
         if dest.exists() {
+            Self::ensure_current_unified_ssot_path_isolated(&dest)?;
             fs::remove_dir_all(&dest)?;
         }
+        Self::ensure_current_unified_ssot_path_isolated(&dest)?;
+        Self::ensure_current_unified_source_tree_isolated(&source)?;
         Self::copy_dir_recursive(&source, &dest)?;
 
         // 计算新哈希 + 解析新元数据
@@ -1763,7 +2195,12 @@ impl SkillService {
         updated_skill.apps.pi = Self::skill_exists_in_app(&updated_skill.directory, &AppType::Pi);
 
         // 同步到所有已启用的应用目录
-        for app in updated_skill.apps.enabled_apps() {
+        for app in updated_skill
+            .apps
+            .enabled_apps()
+            .into_iter()
+            .filter(crate::fork_policy::app_management_allowed)
+        {
             if matches!(app, AppType::Pi) || !Self::scope_owns_app(&updated_skill, &app) {
                 continue;
             }
@@ -1818,6 +2255,7 @@ impl SkillService {
         db: &Arc<Database>,
         target: SkillStorageLocation,
     ) -> Result<MigrationResult> {
+        crate::settings::ensure_private_skill_storage_location(target)?;
         let _state_guard = skill_state_write_guard();
         let current = crate::settings::get_skill_storage_location();
         if current == target {
@@ -1832,15 +2270,37 @@ impl SkillService {
         let old_dir = Self::get_ssot_dir()?;
         let new_dir = match target {
             SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
-            SkillStorageLocation::Unified => {
-                crate::config::get_home_dir().join(".agents").join("skills")
-            }
+            SkillStorageLocation::Unified => Self::unified_ssot_dir(),
         };
+        if matches!(target, SkillStorageLocation::CcSwitch) {
+            crate::app_store::ensure_private_app_data_path_isolated(&new_dir)?;
+        } else {
+            Self::ensure_unified_ssot_path_isolated(&new_dir)?;
+        }
         fs::create_dir_all(&new_dir)?;
+        if matches!(target, SkillStorageLocation::Unified) {
+            Self::ensure_unified_ssot_path_isolated(&new_dir)?;
+        }
         Self::validate_skill_storage_destination(&new_dir)?;
 
         // 2. 逐个移动 skill 目录
-        let skills = db.get_all_installed_skills()?;
+        let stored_skills = db.get_all_installed_skills()?;
+        let mut skills = Vec::new();
+        for stored_skill in stored_skills.values() {
+            let mut stored_skill = stored_skill.clone();
+            stored_skill.apps.pi = Self::skill_exists_in_app(&stored_skill.directory, &AppType::Pi);
+            if !Self::has_private_fork_managed_app(&stored_skill) {
+                // This source may still be the target of an official
+                // ~/.claude/skills symlink. Moving it would silently break the
+                // official installation, so this private fork leaves it in
+                // place even while changing its own storage location.
+                continue;
+            }
+            skills.push(Self::isolate_managed_apps_from_official_source(
+                db,
+                &stored_skill,
+            )?);
+        }
         let pi_dir = Self::get_app_skills_dir(&AppType::Pi)?;
         let mut pi_deployments = Vec::new();
         let mut pi_native_sources = Vec::new();
@@ -1850,7 +2310,7 @@ impl SkillService {
             errors: vec![],
         };
 
-        for skill in skills.values() {
+        for skill in &skills {
             // 下面是 rename 与 remove_dir_all，脏 directory 可把任意目录搬走或删掉。
             // 软失败：本函数已有 errors 收集通道，记一条继续处理其余 skill，
             // 不要整体中断——用户只是在切换存储位置。
@@ -1863,8 +2323,7 @@ impl SkillService {
                     continue;
                 }
             };
-            let scoped_relative = ClaudeSkillScope::from_id(&skill.id)
-                .map(|scope| PathBuf::from(".scopes").join(scope.dir_name()));
+            let scoped_relative = Self::skill_ssot_relative_dir(skill);
             let src_root = scoped_relative
                 .as_ref()
                 .map(|relative| old_dir.join(relative))
@@ -1873,9 +2332,23 @@ impl SkillService {
                 .as_ref()
                 .map(|relative| new_dir.join(relative))
                 .unwrap_or_else(|| new_dir.clone());
+            if matches!(target, SkillStorageLocation::CcSwitch) {
+                crate::app_store::ensure_private_app_data_path_isolated(&dst_root)?;
+            } else {
+                Self::ensure_unified_ssot_path_isolated(&dst_root)?;
+            }
             fs::create_dir_all(&dst_root)?;
+            if matches!(target, SkillStorageLocation::Unified) {
+                Self::ensure_unified_ssot_path_isolated(&dst_root)?;
+            }
             let src = src_root.join(&directory);
             let dst = dst_root.join(&directory);
+            if matches!(current, SkillStorageLocation::Unified) {
+                Self::ensure_unified_ssot_path_isolated(&src)?;
+            }
+            if matches!(target, SkillStorageLocation::Unified) {
+                Self::ensure_unified_ssot_path_isolated(&dst)?;
+            }
             let pi_uses_source_root = Self::paths_alias(&src_root, &pi_dir);
 
             if !src.exists() {
@@ -1899,6 +2372,11 @@ impl SkillService {
             };
 
             // 优先 rename（同文件系统原子操作），失败则 copy+delete
+            Self::ensure_storage_path_isolated_for(current, &src)?;
+            Self::ensure_storage_path_isolated_for(target, &dst)?;
+            if matches!(target, SkillStorageLocation::Unified) {
+                Self::ensure_plain_tree_for_unified_storage(&src)?;
+            }
             match fs::rename(&src, &dst) {
                 Ok(()) => {
                     result.migrated_count += 1;
@@ -1908,20 +2386,33 @@ impl SkillService {
                         pi_deployments.push((scoped_relative.clone(), directory, deployment));
                     }
                 }
-                Err(_) => match Self::copy_dir_recursive(&src, &dst) {
-                    Ok(()) => {
-                        let _ = fs::remove_dir_all(&src);
-                        result.migrated_count += 1;
-                        if pi_uses_source_root {
-                            pi_native_sources.push((scoped_relative.clone(), directory));
-                        } else if let Some(deployment) = pi_deployment {
-                            pi_deployments.push((scoped_relative.clone(), directory, deployment));
+                Err(_) => {
+                    Self::ensure_storage_path_isolated_for(current, &src)?;
+                    Self::ensure_storage_path_isolated_for(target, &dst)?;
+                    if matches!(target, SkillStorageLocation::Unified) {
+                        Self::ensure_plain_tree_for_unified_storage(&src)?;
+                    }
+                    match Self::copy_dir_recursive(&src, &dst) {
+                        Ok(()) => {
+                            if Self::ensure_storage_path_isolated_for(current, &src).is_ok() {
+                                let _ = fs::remove_dir_all(&src);
+                            }
+                            result.migrated_count += 1;
+                            if pi_uses_source_root {
+                                pi_native_sources.push((scoped_relative.clone(), directory));
+                            } else if let Some(deployment) = pi_deployment {
+                                pi_deployments.push((
+                                    scoped_relative.clone(),
+                                    directory,
+                                    deployment,
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            result.errors.push(format!("{}: {e}", skill.directory));
                         }
                     }
-                    Err(e) => {
-                        result.errors.push(format!("{}: {e}", skill.directory));
-                    }
-                },
+                }
             }
         }
 
@@ -1929,7 +2420,7 @@ impl SkillService {
         crate::settings::set_skill_storage_location(target)?;
 
         // 4. 刷新所有应用目录的 symlink（指向新 SSOT）
-        for app in AppType::all() {
+        for app in AppType::all().filter(crate::fork_policy::app_management_allowed) {
             let _ = Self::sync_to_app_unlocked(db, &app);
         }
         for (scoped_relative, directory, deployment) in pi_deployments {
@@ -2077,20 +2568,26 @@ impl SkillService {
         restored_skill.apps = SkillApps::only(current_app);
         restored_skill.updated_at = 0;
 
+        Self::ensure_current_unified_ssot_path_isolated(&restore_path)?;
+        Self::ensure_current_unified_source_tree_isolated(&backup_skill_dir)?;
         Self::copy_dir_recursive(&backup_skill_dir, &restore_path)?;
 
         // 重新计算内容哈希
         restored_skill.content_hash = Self::compute_dir_hash(&restore_path).ok();
 
         if let Err(err) = db.save_skill(&restored_skill) {
-            let _ = fs::remove_dir_all(&restore_path);
+            if Self::ensure_current_unified_ssot_path_isolated(&restore_path).is_ok() {
+                let _ = fs::remove_dir_all(&restore_path);
+            }
             return Err(err.into());
         }
 
         if !restored_skill.apps.is_empty() {
             if let Err(err) = Self::sync_skill_to_app(&restored_skill, current_app) {
                 let _ = db.delete_skill(&restored_skill.id);
-                let _ = fs::remove_dir_all(&restore_path);
+                if Self::ensure_current_unified_ssot_path_isolated(&restore_path).is_ok() {
+                    let _ = fs::remove_dir_all(&restore_path);
+                }
                 return Err(err);
             }
         }
@@ -2152,7 +2649,7 @@ impl SkillService {
 
         // 收集所有待扫描的目录及其来源标签
         let mut scan_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in AppType::all() {
+        for app in AppType::all().filter(crate::fork_policy::app_management_allowed) {
             if let Ok(d) = Self::get_app_skills_dir(&app) {
                 scan_sources.push((d, app.as_str().to_string()));
             }
@@ -2242,11 +2739,13 @@ impl SkillService {
                     continue;
                 }
             };
+            let mut allowed_apps = selection.apps.clone();
+            allowed_apps.claude = false;
             // A single import selection may represent the same-named Skill in
             // both Claude domains. Split those into two records and read each
             // domain's own live directory; never choose one as the source for
             // the other. Non-Claude applications retain the legacy shared row.
-            for (scope, mut apps) in Self::split_import_apps(selection.apps.clone()) {
+            for (scope, mut apps) in Self::split_import_apps(allowed_apps) {
                 let ssot_dir = match scope {
                     Some(scope) => Self::get_scoped_ssot_dir(scope)?,
                     None => Self::get_ssot_dir()?,
@@ -2268,6 +2767,7 @@ impl SkillService {
                         let enabled_apps = apps.enabled_apps();
                         let candidate_apps = if enabled_apps.is_empty() {
                             AppType::all()
+                                .filter(crate::fork_policy::app_management_allowed)
                                 .filter(|app| ClaudeSkillScope::for_app(app).is_none())
                                 .collect::<Vec<_>>()
                         } else {
@@ -2300,6 +2800,8 @@ impl SkillService {
 
                 let dest = ssot_dir.join(&dir_name);
                 if !dest.exists() {
+                    Self::ensure_current_unified_ssot_path_isolated(&dest)?;
+                    Self::ensure_current_unified_source_tree_isolated(&source)?;
                     Self::copy_dir_recursive(&source, &dest)?;
                 }
 
@@ -2565,7 +3067,7 @@ impl SkillService {
     /// - Symlink: 仅使用 symlink
     /// - Copy: 仅使用文件复制
     pub fn sync_to_app_dir(directory: &str, app: &AppType) -> Result<()> {
-        if matches!(app, AppType::ClaudeDesktop) {
+        if !crate::fork_policy::app_management_allowed(app) {
             return Ok(());
         }
 
@@ -2592,7 +3094,7 @@ impl SkillService {
     }
 
     fn sync_source_to_app(source: &Path, directory: &str, app: &AppType) -> Result<()> {
-        if matches!(app, AppType::ClaudeDesktop) {
+        if !crate::fork_policy::app_management_allowed(app) {
             return Ok(());
         }
 
@@ -2776,7 +3278,7 @@ impl SkillService {
         app: &AppType,
         preserved_path: Option<&Path>,
     ) -> Result<()> {
-        if matches!(app, AppType::ClaudeDesktop) {
+        if !crate::fork_policy::app_management_allowed(app) {
             return Ok(());
         }
 
@@ -2813,7 +3315,7 @@ impl SkillService {
 
     /// Caller must hold either the Skills state read or write guard.
     fn sync_to_app_unlocked(db: &Arc<Database>, app: &AppType) -> Result<()> {
-        if matches!(app, AppType::ClaudeDesktop | AppType::Pi) {
+        if !crate::fork_policy::app_management_allowed(app) || matches!(app, AppType::Pi) {
             return Ok(());
         }
 
@@ -3772,7 +4274,7 @@ impl SkillService {
             return Ok(Some(ssot_path));
         }
 
-        for app in AppType::all() {
+        for app in AppType::all().filter(crate::fork_policy::app_management_allowed) {
             if !Self::scope_owns_app(skill, &app) {
                 continue;
             }
@@ -4125,8 +4627,11 @@ impl SkillService {
             // 复制到 SSOT
             let dest = ssot_dir.join(&install_name);
             if dest.exists() {
-                let _ = fs::remove_dir_all(&dest);
+                Self::ensure_current_unified_ssot_path_isolated(&dest)?;
+                fs::remove_dir_all(&dest)?;
             }
+            Self::ensure_current_unified_ssot_path_isolated(&dest)?;
+            Self::ensure_current_unified_source_tree_isolated(&skill_dir)?;
             Self::copy_dir_recursive(&skill_dir, &dest)?;
 
             // 计算内容哈希
@@ -4512,16 +5017,18 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
                 continue;
             }
             if let Ok(app) = row.app_type.parse::<AppType>() {
-                discovered
-                    .entry(row.directory.clone())
-                    .or_default()
-                    .set_enabled_for(&app, true);
+                if crate::fork_policy::app_management_allowed(&app) {
+                    discovered
+                        .entry(row.directory.clone())
+                        .or_default()
+                        .set_enabled_for(&app, true);
+                }
             }
         }
     }
 
     // 扫描各应用目录
-    for app in AppType::all() {
+    for app in AppType::all().filter(crate::fork_policy::app_management_allowed) {
         let app_dir = match SkillService::get_app_skills_dir(&app) {
             Ok(d) => d,
             Err(_) => continue,
@@ -4552,6 +5059,8 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
             // 复制到 SSOT（如果不存在）
             let ssot_path = ssot_dir.join(&dir_name);
             if !ssot_path.exists() {
+                SkillService::ensure_current_unified_ssot_path_isolated(&ssot_path)?;
+                SkillService::ensure_current_unified_source_tree_isolated(&path)?;
                 SkillService::copy_dir_recursive(&path, &ssot_path)?;
             }
 
@@ -5627,18 +6136,54 @@ mod tests {
         }
     }
 
-    struct StorageLocationGuard(SkillStorageLocation);
+    struct ReloadedTestHomeGuard(Option<std::ffi::OsString>);
+    impl ReloadedTestHomeGuard {
+        fn set(home: &Path) -> Self {
+            let guard = Self(std::env::var_os("CC_SWITCH_TEST_HOME"));
+            std::env::set_var("CC_SWITCH_TEST_HOME", home);
+            crate::settings::reload_settings().expect("reload isolated settings");
+            guard
+        }
+    }
+    impl Drop for ReloadedTestHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = crate::settings::reload_settings();
+        }
+    }
+
+    #[cfg(unix)]
+    fn alias_test_directory(source: &Path, destination: &Path) -> bool {
+        std::os::unix::fs::symlink(source, destination).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn alias_test_directory(source: &Path, destination: &Path) -> bool {
+        if std::os::windows::fs::symlink_dir(source, destination).is_ok() {
+            return true;
+        }
+
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(destination)
+            .arg(source)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    struct StorageLocationGuard(Option<SkillStorageLocation>);
     impl StorageLocationGuard {
         fn set(location: SkillStorageLocation) -> Self {
-            let previous = crate::settings::get_skill_storage_location();
-            crate::settings::set_skill_storage_location(location)
-                .expect("set test skill storage location");
+            let previous = crate::settings::replace_test_skill_storage_location(Some(location));
             Self(previous)
         }
     }
     impl Drop for StorageLocationGuard {
         fn drop(&mut self) {
-            let _ = crate::settings::set_skill_storage_location(self.0);
+            crate::settings::replace_test_skill_storage_location(self.0);
         }
     }
 
@@ -5652,7 +6197,7 @@ mod tests {
             repo_name: None,
             repo_branch: None,
             readme_url: None,
-            apps: SkillApps::default(),
+            apps: SkillApps::only(&AppType::Codex),
             installed_at: 0,
             content_hash: None,
             updated_at: 0,
@@ -5838,12 +6383,12 @@ mod tests {
         let _guard = TestHomeGuard::set(temp.path());
 
         // 受害目录与 app skills 目录都先建好，保证未修复时代码真的能删到它：
-        // app_dir = {home}/.claude/skills，"../../victim-remove" 解析为 {home}/victim-remove。
+        // app_dir = {home}/.codex/skills，"../../victim-remove" 解析为 {home}/victim-remove。
         let victim = temp.path().join("victim-remove");
         fs::create_dir_all(&victim).expect("create victim dir");
-        fs::create_dir_all(temp.path().join(".claude").join("skills")).expect("create app dir");
+        fs::create_dir_all(temp.path().join(".codex").join("skills")).expect("create app dir");
 
-        let result = SkillService::remove_from_app("../../victim-remove", &AppType::Claude);
+        let result = SkillService::remove_from_app("../../victim-remove", &AppType::Codex);
 
         assert!(result.is_err(), "remove_from_app must reject traversal");
         assert!(victim.exists(), "victim directory must not be deleted");
@@ -5879,6 +6424,18 @@ mod tests {
     }
 
     #[test]
+    fn private_build_rejects_unified_storage_migration_at_service_boundary() {
+        let previous = crate::settings::replace_test_skill_storage_location(None);
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+
+        let result = SkillService::migrate_storage(&db, SkillStorageLocation::Unified);
+
+        crate::settings::replace_test_skill_storage_location(previous);
+        let error = result.expect_err("shared Skill storage migration must be rejected");
+        assert!(error.to_string().contains("~/.agents/skills"));
+    }
+
+    #[test]
     #[serial_test::serial]
     fn migrate_storage_rejects_an_aliased_destination_before_moving_skills() {
         let _location = StorageLocationGuard::set(SkillStorageLocation::CcSwitch);
@@ -5909,6 +6466,52 @@ mod tests {
             source.join("SKILL.md").exists(),
             "validation must happen before any source is moved"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn migrate_storage_rejects_a_unified_alias_to_official_claude_before_moving_skills() {
+        let temp = tempdir().expect("tempdir");
+        let _home = ReloadedTestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::CcSwitch);
+        let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
+
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        let skill = poisoned_skill("owner/repo:skill", "test-skill");
+        db.save_skill(&skill).expect("save skill");
+        let source = SkillService::get_ssot_dir()
+            .expect("private SSOT")
+            .join("test-skill");
+        write_skill(&source, "managed");
+
+        let official_skills = temp.path().join(".claude").join("skills");
+        let unified_parent = temp.path().join(".agents");
+        let unified_skills = unified_parent.join("skills");
+        fs::create_dir_all(&official_skills).expect("create official Skills root");
+        fs::create_dir_all(&unified_parent).expect("create Unified parent");
+        fs::write(official_skills.join("sentinel.txt"), "official sentinel")
+            .expect("write official sentinel");
+        assert!(
+            alias_test_directory(&official_skills, &unified_skills),
+            "create Unified destination alias to official Claude"
+        );
+
+        let result = SkillService::migrate_storage(&db, SkillStorageLocation::Unified);
+        let official_after = fs::read_to_string(official_skills.join("sentinel.txt"))
+            .expect("read official sentinel after rejected migration");
+
+        #[cfg(windows)]
+        fs::remove_dir(&unified_skills).expect("remove test junction");
+
+        assert!(
+            result.is_err(),
+            "migration must reject a Unified target aliased to official Claude"
+        );
+        assert!(
+            source.join("SKILL.md").exists(),
+            "migration validation must run before moving the managed source"
+        );
+        assert_eq!(official_after, "official sentinel");
     }
 
     #[test]
@@ -5948,6 +6551,79 @@ mod tests {
             pi_skill.join("SKILL.md").exists(),
             "the previously native Pi skill must stay active after migration"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn migrate_storage_preserves_official_legacy_source_and_moves_only_managed_copy() {
+        let _location = StorageLocationGuard::set(SkillStorageLocation::CcSwitch);
+        let temp = tempdir().expect("tempdir");
+        let _home = TestHomeGuard::set(temp.path());
+        let _pi_dir = crate::pi_config::test_support::TestAgentDir::new();
+
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        let mut skill = poisoned_skill("owner/repo:shared", "shared-skill");
+        skill.apps = SkillApps {
+            claude: true,
+            claude_cometix: true,
+            ..Default::default()
+        };
+        db.save_skill(&skill).expect("save mixed legacy skill");
+
+        let old_source = SkillService::get_ssot_dir()
+            .expect("old SSOT")
+            .join("shared-skill");
+        write_skill(&old_source, "official-shared");
+        fs::write(old_source.join("prompt.md"), "official-shared").expect("write shared prompt");
+
+        let official_live = SkillService::get_app_skills_dir(&AppType::Claude)
+            .expect("official Skills dir")
+            .join("shared-skill");
+        fs::create_dir_all(official_live.parent().expect("official Skills parent"))
+            .expect("create official Skills parent");
+        let official_is_symlink = SkillService::create_symlink(&old_source, &official_live).is_ok();
+
+        SkillService::sync_to_app(&db, &AppType::ClaudeCometix)
+            .expect("seed managed Cometix deployment");
+
+        let result = SkillService::migrate_storage(&db, SkillStorageLocation::Unified)
+            .expect("migrate private managed storage");
+
+        let managed_source = temp
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join(".scopes")
+            .join("private-managed")
+            .join("shared-skill");
+        assert_eq!(result.migrated_count, 1);
+        assert!(old_source.join("prompt.md").exists());
+        assert_eq!(
+            fs::read_to_string(old_source.join("prompt.md")).expect("read official source"),
+            "official-shared"
+        );
+        assert!(managed_source.join("prompt.md").exists());
+        if official_is_symlink {
+            assert_eq!(
+                fs::read_to_string(official_live.join("prompt.md"))
+                    .expect("read official symlink after migration"),
+                "official-shared"
+            );
+        }
+
+        let official_row = db
+            .get_installed_skill(&skill.id)
+            .expect("query official row")
+            .expect("official row remains");
+        assert!(official_row.apps.claude);
+        assert!(!official_row.apps.claude_cometix);
+        let managed_id = SkillService::private_managed_skill_id(&skill.id);
+        let managed_row = db
+            .get_installed_skill(&managed_id)
+            .expect("query managed row")
+            .expect("managed row remains");
+        assert!(!managed_row.apps.claude);
+        assert!(managed_row.apps.claude_cometix);
     }
 
     #[test]
@@ -6132,17 +6808,17 @@ mod tests {
         // 否则「未修复时会中断」这个前提不成立，测试就成了摆设。
         let mut bad = poisoned_skill("owner/repo:bad", "../../escape-sync");
         bad.name = "a-poisoned".to_string();
-        bad.apps = SkillApps::only(&AppType::Claude);
+        bad.apps = SkillApps::only(&AppType::Codex);
         db.save_skill(&bad).expect("seed poisoned row");
 
         let mut good = poisoned_skill("owner/repo:good", "good-skill");
         good.name = "z-healthy".to_string();
-        good.apps = SkillApps::only(&AppType::Claude);
+        good.apps = SkillApps::only(&AppType::Codex);
         db.save_skill(&good).expect("seed good row");
 
-        SkillService::sync_to_app(&db, &AppType::Claude).expect("sync must not abort");
+        SkillService::sync_to_app(&db, &AppType::Codex).expect("sync must not abort");
 
-        let app_dir = SkillService::get_app_skills_dir(&AppType::Claude).expect("app dir");
+        let app_dir = SkillService::get_app_skills_dir(&AppType::Codex).expect("app dir");
         assert!(
             app_dir.join("good-skill").exists(),
             "the healthy skill must still be synced despite the poisoned row"
@@ -6181,6 +6857,134 @@ mod tests {
         let cometix = SkillService::get_app_skills_dir(&AppType::ClaudeCometix)
             .expect("resolve Cometix skills dir");
         assert_eq!(cometix, temp.path().join(".hlclaude").join("skills"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cometix_skill_sync_rejects_an_inner_alias_to_official_claude_skills() {
+        let temp = tempdir().expect("tempdir");
+        let _home = ReloadedTestHomeGuard::set(temp.path());
+        let official_skills = temp.path().join(".claude").join("skills");
+        let cometix_root = temp.path().join(".hlclaude");
+        let cometix_skills = cometix_root.join("skills");
+        fs::create_dir_all(official_skills.join("test-skill")).expect("create official skill");
+        fs::create_dir_all(&cometix_root).expect("create Cometix root");
+        fs::write(
+            official_skills.join("test-skill").join("SKILL.md"),
+            "official sentinel",
+        )
+        .expect("write official sentinel");
+        assert!(
+            alias_test_directory(&official_skills, &cometix_skills),
+            "create Cometix Skills alias to official Claude"
+        );
+
+        let ssot_skill = SkillService::get_ssot_dir()
+            .expect("SSOT")
+            .join("test-skill");
+        write_skill(&ssot_skill, "private managed");
+
+        let result = SkillService::sync_to_app_dir("test-skill", &AppType::ClaudeCometix);
+        let official_after =
+            fs::read_to_string(official_skills.join("test-skill").join("SKILL.md"))
+                .expect("read official sentinel after rejected sync");
+
+        #[cfg(windows)]
+        fs::remove_dir(&cometix_skills).expect("remove test junction");
+
+        assert!(
+            result.is_err(),
+            "Cometix must reject the aliased Skills root"
+        );
+        assert_eq!(official_after, "official sentinel");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn unified_ssot_rejects_a_root_alias_to_official_claude_skills() {
+        let temp = tempdir().expect("tempdir");
+        let _home = ReloadedTestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
+        let official_skills = temp.path().join(".claude").join("skills");
+        let unified_parent = temp.path().join(".agents");
+        let unified_skills = unified_parent.join("skills");
+        fs::create_dir_all(&official_skills).expect("create official Skills root");
+        fs::create_dir_all(&unified_parent).expect("create Unified parent");
+        fs::write(official_skills.join("sentinel.txt"), "official sentinel")
+            .expect("write official sentinel");
+        assert!(
+            alias_test_directory(&official_skills, &unified_skills),
+            "create Unified SSOT alias to official Claude"
+        );
+
+        let result = SkillService::get_ssot_dir();
+        let official_after = fs::read_to_string(official_skills.join("sentinel.txt"))
+            .expect("read official sentinel after rejected access");
+
+        #[cfg(windows)]
+        fs::remove_dir(&unified_skills).expect("remove test junction");
+
+        assert!(result.is_err(), "Unified SSOT root alias must be rejected");
+        assert_eq!(official_after, "official sentinel");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn unified_ssot_rejects_a_nested_alias_before_any_managed_mutation() {
+        let temp = tempdir().expect("tempdir");
+        let _home = ReloadedTestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
+        let unified_skills = SkillService::get_ssot_dir().expect("initial clean Unified SSOT");
+        let official_skill = temp
+            .path()
+            .join(".claude")
+            .join("skills")
+            .join("official-skill");
+        fs::create_dir_all(&official_skill).expect("create official Skill");
+        fs::write(official_skill.join("SKILL.md"), "official sentinel")
+            .expect("write official sentinel");
+        let nested_alias = unified_skills.join("nested-alias");
+        assert!(
+            alias_test_directory(&official_skill, &nested_alias),
+            "create nested Unified alias to official Claude"
+        );
+
+        let result = SkillService::get_ssot_dir();
+        let official_after = fs::read_to_string(official_skill.join("SKILL.md"))
+            .expect("read official sentinel after rejected access");
+
+        #[cfg(windows)]
+        fs::remove_dir(&nested_alias).expect("remove test junction");
+
+        assert!(result.is_err(), "nested Unified alias must be rejected");
+        assert_eq!(official_after, "official sentinel");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn unified_ssot_rejects_a_multiply_link_file_before_any_managed_mutation() {
+        let temp = tempdir().expect("tempdir");
+        let _home = ReloadedTestHomeGuard::set(temp.path());
+        let _location = StorageLocationGuard::set(SkillStorageLocation::Unified);
+        let unified_skills = SkillService::get_ssot_dir().expect("initial clean Unified SSOT");
+        let official_settings = temp.path().join(".claude").join("settings.json");
+        fs::create_dir_all(official_settings.parent().expect("official Claude root"))
+            .expect("create official Claude root");
+        fs::write(&official_settings, "official sentinel").expect("write official sentinel");
+        let managed_skill = unified_skills.join("managed-skill");
+        fs::create_dir_all(&managed_skill).expect("create managed Skill directory");
+        fs::hard_link(&official_settings, managed_skill.join("SKILL.md"))
+            .expect("create hard link into Unified SSOT");
+
+        let result = SkillService::get_ssot_dir();
+        let official_after =
+            fs::read_to_string(&official_settings).expect("read official settings after rejection");
+
+        assert!(
+            result.is_err(),
+            "multiply-linked files inside Unified SSOT must be rejected"
+        );
+        assert_eq!(official_after, "official sentinel");
     }
 
     #[test]

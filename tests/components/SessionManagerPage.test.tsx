@@ -272,6 +272,7 @@ describe("SessionManagerPage", () => {
     expect(
       screen.queryByText("Cometix Claude History"),
     ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /删除会话/i })).toBeDisabled();
 
     await switchProviderFilter(/Cometix/i);
     expect(

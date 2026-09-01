@@ -33,10 +33,16 @@ import { AboutSection } from "@/components/settings/AboutSection";
 
 describe("AboutSection Cometix version source", () => {
   beforeEach(() => {
+    getToolVersionsMock.mockClear();
     getToolVersionsMock.mockImplementation(async (tools: string[]) =>
       tools.map((name) => ({
         name,
-        version: name === "claude-cometix" ? "2.1.219" : null,
+        version:
+          name === "claude"
+            ? "official-claude-version"
+            : name === "claude-cometix"
+              ? "2.1.219"
+              : null,
         latest_version: name === "claude-cometix" ? "2.1.220" : null,
         error: null,
         installed_but_broken: false,
@@ -44,6 +50,21 @@ describe("AboutSection Cometix version source", () => {
         wsl_distro: null,
       })),
     );
+  });
+
+  it("does not probe or render the official Claude installation", async () => {
+    render(<AboutSection isPortable={false} />);
+
+    await screen.findByText("settings.cometixVersionSource");
+
+    const requestedTools = getToolVersionsMock.mock.calls.flatMap(
+      ([tools]) => tools as string[],
+    );
+    expect(requestedTools).not.toContain("claude");
+    expect(requestedTools).toContain("claude-cometix");
+    expect(
+      screen.queryByText("official-claude-version"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows that the Cometix latest version comes from GitHub Releases", async () => {
@@ -67,5 +88,6 @@ describe("AboutSection Cometix version source", () => {
     expect(commands).toHaveTextContent(".local\\share\\hlclaude");
     expect(commands).toHaveTextContent("hlclaude.cmd");
     expect(commands).toHaveTextContent("Test-Path $hlclaudeLauncher");
+    expect(commands).not.toHaveTextContent("@anthropic-ai/claude-code");
   });
 });

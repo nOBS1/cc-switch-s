@@ -23,12 +23,12 @@ describe("ProxyToggle", () => {
       status: undefined,
     };
     useProxyStatusMock.mockImplementation(() => proxyState);
-    const { rerender } = render(<ProxyToggle activeApp="claude" />);
+    const { rerender } = render(<ProxyToggle activeApp="codex" />);
 
     expect(screen.getByRole("switch")).toBeDisabled();
 
     proxyState.isInitialStatusPending = false;
-    rerender(<ProxyToggle activeApp="claude" />);
+    rerender(<ProxyToggle activeApp="codex" />);
 
     expect(screen.getByRole("switch")).toBeEnabled();
   });

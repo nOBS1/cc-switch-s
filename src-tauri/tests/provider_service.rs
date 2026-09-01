@@ -1,9 +1,9 @@
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_cometix_settings_path, get_claude_settings_path, read_json_file,
-    write_codex_live_atomic, AppError, AppType, McpApps, McpServer, MultiAppConfig, Provider,
-    ProviderMeta, ProviderService,
+    get_claude_cometix_settings_path, get_claude_settings_path, read_json_file, update_settings,
+    write_codex_live_atomic, AppError, AppSettings, AppType, McpApps, McpServer, MultiAppConfig,
+    Provider, ProviderMeta, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -23,6 +23,29 @@ fn sanitize_provider_name(name: &str) -> String {
         .to_lowercase()
 }
 
+/// Generic Cometix switch tests exercise steady-state backfill/common-config behavior.
+/// The dedicated migration test below covers the one-time `.claude-cometix` -> `.hlclaude`
+/// projection, so mark that migration complete here to keep the two behaviors independent.
+fn mark_cometix_live_migration_complete() {
+    let target_config_dir = get_claude_cometix_settings_path()
+        .parent()
+        .expect("Cometix settings directory")
+        .to_string_lossy()
+        .to_string();
+    let mut settings = serde_json::to_value(AppSettings::default())
+        .expect("serialize default app settings for test");
+    settings["localMigrations"] = json!({
+        "cometixHlclaudeLiveV2": {
+            "completedAt": "2026-01-01T00:00:00Z",
+            "targetConfigDir": target_config_dir
+        }
+    });
+    update_settings(
+        serde_json::from_value(settings).expect("deserialize Cometix migration test settings"),
+    )
+    .expect("mark Cometix live migration complete");
+}
+
 #[test]
 fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -32,8 +55,8 @@ fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "legacy-provider".to_string();
         manager.providers.insert(
             "legacy-provider".to_string(),
@@ -55,17 +78,17 @@ fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
     state
         .db
         .set_config_snippet(
-            AppType::Claude.as_str(),
+            AppType::ClaudeCometix.as_str(),
             Some(r#"{ "includeCoAuthoredBy": false }"#.to_string()),
         )
         .expect("set common config snippet");
 
-    ProviderService::migrate_legacy_common_config_usage_if_needed(&state, AppType::Claude)
+    ProviderService::migrate_legacy_common_config_usage_if_needed(&state, AppType::ClaudeCometix)
         .expect("migrate legacy common config");
 
     let providers = state
         .db
-        .get_all_providers(AppType::Claude.as_str())
+        .get_all_providers(AppType::ClaudeCometix.as_str())
         .expect("get providers after migration");
     let provider = providers
         .get("legacy-provider")
@@ -1765,14 +1788,14 @@ fn switch_codex_projects_mcp_despite_broken_claude_json() {
 
 /// sync_all_enabled 的全量语义（配置导入 / 云同步恢复）：单个应用的
 /// live 损坏不阻断其余应用的投影，但失败必须聚合上报——调用方需要
-/// 知道结果不完整。历史实现按 AppType::all() 顺序 `?` 短路，Claude
-/// 排在 Codex 前面，一份坏 ~/.claude.json 会让所有后续应用的 MCP
+/// 知道结果不完整。历史实现按 AppType::all() 顺序 `?` 短路，一份坏的
+/// Cometix ~/.hlclaude/.claude.json 不能让后续应用的 MCP
 /// 状态永远陈旧。
 #[test]
 fn sync_all_enabled_reports_broken_app_but_projects_the_rest() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
 
     write_codex_live_atomic(&json!({ "OPENAI_API_KEY": "sk" }), Some("")).expect("seed codex live");
 
@@ -1805,23 +1828,140 @@ fn sync_all_enabled_reports_broken_app_but_projects_the_rest() {
 
     let state = create_test_state_with_config(&config).expect("create test state");
 
-    let claude_json = cc_switch_lib::get_claude_mcp_path();
-    std::fs::write(&claude_json, "{ not valid json").expect("seed broken claude json");
+    cc_switch_lib::McpService::upsert_server(
+        &state,
+        McpServer {
+            id: "cometix-trigger".into(),
+            name: "Cometix Trigger".into(),
+            server: json!({ "type": "stdio", "command": "echo" }),
+            apps: McpApps {
+                claude_cometix: true,
+                ..McpApps::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    )
+    .expect("seed a managed Cometix MCP row before its live directory exists");
+
+    let cometix_dir = home.join(".hlclaude");
+    std::fs::create_dir_all(&cometix_dir).expect("create Cometix config dir");
+    let cometix_json = cometix_dir.join(".claude.json");
+    std::fs::write(&cometix_json, "{ not valid json").expect("seed broken Cometix JSON");
 
     let err = cc_switch_lib::McpService::sync_all_enabled(&state)
-        .expect_err("broken claude live must surface as an aggregated error");
+        .expect_err("broken Cometix live must surface as an aggregated error");
     let message = err.to_string();
     assert!(
-        message.contains("claude"),
+        message.contains("claude-cometix") || message.contains("Cometix"),
         "aggregated error should name the failing app, got: {message}"
     );
 
-    // Claude 的失败不能阻断 Codex：best-effort 必须继续投影其余应用。
+    // Cometix 的失败不能阻断 Codex：best-effort 必须继续投影其余应用。
     let live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
         .expect("read config.toml after sync_all_enabled");
     assert!(
         live.contains("mcp_servers.echo-server"),
         "codex projection must proceed despite the broken claude file, got: {live}"
+    );
+}
+
+/// The private fork owns only the Cometix Claude installation. A full live
+/// reprojection (for example after import or startup recovery) must therefore
+/// leave the official Claude Code settings byte-for-byte untouched while still
+/// projecting the selected Cometix provider into hlclaude's independent home.
+#[test]
+fn private_fork_full_live_sync_preserves_official_claude_and_projects_cometix() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let official_path = get_claude_settings_path();
+    std::fs::create_dir_all(official_path.parent().expect("official config dir"))
+        .expect("create official config dir");
+    let official_sentinel = br#"{"authMode":"oauth","owner":"official-claude"}"#;
+    std::fs::write(&official_path, official_sentinel).expect("seed official Claude settings");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("official Claude manager");
+        manager.current = "third-party-relay".to_string();
+        manager.providers.insert(
+            "third-party-relay".to_string(),
+            Provider::with_id(
+                "third-party-relay".to_string(),
+                "Third-party relay".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "must-not-reach-official",
+                        "ANTHROPIC_BASE_URL": "https://relay.example.com"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+    {
+        let manager = config
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
+        manager.current = "cometix-relay".to_string();
+        manager.providers.insert(
+            "cometix-relay".to_string(),
+            Provider::with_id(
+                "cometix-relay".to_string(),
+                "Cometix relay".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "cometix-token",
+                        "ANTHROPIC_BASE_URL": "https://cometix.example.com"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&config).expect("create test state");
+
+    let rejection = ProviderService::switch(&state, AppType::Claude, "third-party-relay")
+        .expect_err("the private fork must reject official Claude provider switching");
+    assert!(
+        rejection.to_string().contains("Official Claude Code"),
+        "unexpected official Claude rejection: {rejection}"
+    );
+    assert_eq!(
+        std::fs::read(&official_path).expect("read official settings after rejected switch"),
+        official_sentinel,
+        "a rejected official Claude switch must leave settings byte-for-byte untouched"
+    );
+
+    ProviderService::sync_current_to_live(&state).expect("full live sync should succeed");
+
+    assert_eq!(
+        std::fs::read(&official_path).expect("read official Claude settings"),
+        official_sentinel,
+        "the private fork must not overwrite the official Claude Code settings"
+    );
+
+    let cometix_live: serde_json::Value =
+        read_json_file(&get_claude_cometix_settings_path()).expect("read Cometix live settings");
+    assert_eq!(
+        cometix_live
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(|value| value.as_str()),
+        Some("cometix-token"),
+        "the full sync must still project the selected Cometix provider"
+    );
+    assert_eq!(
+        cometix_live
+            .pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(|value| value.as_str()),
+        Some("https://cometix.example.com")
     );
 }
 
@@ -2046,16 +2186,22 @@ requires_openai_auth = true
 }
 
 #[test]
-fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup() {
+fn sync_current_cometix_provider_ignores_unsupported_takeover_state() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
 
+    let official_path = get_claude_settings_path();
+    std::fs::create_dir_all(official_path.parent().expect("official settings dir"))
+        .expect("create official settings dir");
+    let official_sentinel = br#"{"official":"must-stay-byte-identical"}"#;
+    std::fs::write(&official_path, official_sentinel).expect("seed official Claude settings");
+
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "current-provider".to_string();
 
         let mut provider = Provider::with_id(
@@ -2083,64 +2229,80 @@ fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup(
     state
         .db
         .set_config_snippet(
-            AppType::Claude.as_str(),
+            AppType::ClaudeCometix.as_str(),
             Some(r#"{ "includeCoAuthoredBy": false }"#.to_string()),
         )
         .expect("set common config snippet");
 
-    let taken_over_live = json!({
+    // Cometix has no proxy data plane. Even if a stale/forged backup row and
+    // enabled flag exist, they must not claim ownership of `.hlclaude` live.
+    let unsupported_takeover_live = json!({
         "env": {
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:5000",
             "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED"
         }
     });
-    let settings_path = get_claude_settings_path();
+    let settings_path = get_claude_cometix_settings_path();
     std::fs::create_dir_all(settings_path.parent().expect("settings dir")).expect("create dir");
     std::fs::write(
         &settings_path,
-        serde_json::to_string_pretty(&taken_over_live).expect("serialize taken over live"),
+        serde_json::to_string_pretty(&unsupported_takeover_live)
+            .expect("serialize unsupported takeover live"),
     )
-    .expect("write taken over live");
+    .expect("write unsupported takeover live");
 
-    futures::executor::block_on(state.db.save_live_backup("claude", "{\"env\":{}}"))
+    futures::executor::block_on(state.db.save_live_backup("claude-cometix", "{\"env\":{}}"))
         .expect("seed live backup");
 
-    let mut proxy_config = futures::executor::block_on(state.db.get_proxy_config_for_app("claude"))
-        .expect("get proxy config");
+    let mut proxy_config =
+        futures::executor::block_on(state.db.get_proxy_config_for_app("claude-cometix"))
+            .expect("get proxy config");
     proxy_config.enabled = true;
     futures::executor::block_on(state.db.update_proxy_config_for_app(proxy_config))
         .expect("enable takeover");
 
-    ProviderService::sync_current_provider_for_app(&state, AppType::Claude)
+    ProviderService::sync_current_provider_for_app(&state, AppType::ClaudeCometix)
         .expect("sync current provider should succeed");
 
     let live_after: serde_json::Value =
         read_json_file(&settings_path).expect("read live settings after sync");
     assert_eq!(
-        live_after, taken_over_live,
-        "sync should not overwrite live config while takeover is active"
+        live_after
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(|value| value.as_str()),
+        Some("real-token"),
+        "unsupported Cometix takeover state must not preserve the proxy placeholder"
+    );
+    assert_eq!(
+        live_after
+            .pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(|value| value.as_str()),
+        Some("https://claude.example"),
+        "Cometix live must be rewritten from its real provider"
+    );
+    assert_eq!(
+        live_after
+            .get("includeCoAuthoredBy")
+            .and_then(|value| value.as_bool()),
+        Some(false),
+        "Cometix live must include its private common config"
     );
 
-    let backup = futures::executor::block_on(state.db.get_live_backup("claude"))
+    let backup = futures::executor::block_on(state.db.get_live_backup("claude-cometix"))
         .expect("get live backup")
         .expect("backup exists");
     let backup_value: serde_json::Value =
         serde_json::from_str(&backup.original_config).expect("parse backup value");
 
     assert_eq!(
-        backup_value
-            .get("includeCoAuthoredBy")
-            .and_then(|v| v.as_bool()),
-        Some(false),
-        "restore backup should receive the updated effective config"
+        backup_value,
+        json!({"env": {}}),
+        "unsupported Cometix backup state is inert and must not become a proxy restore source"
     );
     assert_eq!(
-        backup_value
-            .get("env")
-            .and_then(|v| v.get("ANTHROPIC_AUTH_TOKEN"))
-            .and_then(|v| v.as_str()),
-        Some("real-token"),
-        "restore backup should preserve the provider token rather than proxy placeholder"
+        std::fs::read(&official_path).expect("read official Claude settings"),
+        official_sentinel,
+        "Cometix sync must not touch official Claude settings"
     );
 }
 
@@ -2309,30 +2471,30 @@ fn explicitly_cleared_common_snippet_is_not_auto_extracted() {
     let state = create_test_state().expect("create test state");
     state
         .db
-        .set_config_snippet_cleared(AppType::Claude.as_str(), true)
+        .set_config_snippet_cleared(AppType::ClaudeCometix.as_str(), true)
         .expect("mark snippet explicitly cleared");
 
     assert!(
         !state
             .db
-            .should_auto_extract_config_snippet(AppType::Claude.as_str())
+            .should_auto_extract_config_snippet(AppType::ClaudeCometix.as_str())
             .expect("check auto-extract eligibility"),
         "explicitly cleared snippets should block auto-extraction"
     );
 
     state
         .db
-        .set_config_snippet(AppType::Claude.as_str(), Some("{}".to_string()))
+        .set_config_snippet(AppType::ClaudeCometix.as_str(), Some("{}".to_string()))
         .expect("set snippet");
     state
         .db
-        .set_config_snippet_cleared(AppType::Claude.as_str(), false)
+        .set_config_snippet_cleared(AppType::ClaudeCometix.as_str(), false)
         .expect("clear explicit-empty marker");
 
     assert!(
         !state
             .db
-            .should_auto_extract_config_snippet(AppType::Claude.as_str())
+            .should_auto_extract_config_snippet(AppType::ClaudeCometix.as_str())
             .expect("check auto-extract after snippet saved"),
         "existing snippets should also block auto-extraction"
     );
@@ -2551,14 +2713,15 @@ fn switch_google_official_gemini_preserves_env_vars() {
 }
 
 #[test]
-fn provider_service_switch_claude_updates_live_and_state() {
+fn provider_service_switch_cometix_updates_live_and_state() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
+    mark_cometix_live_migration_complete();
     let _home = ensure_test_home();
 
-    let settings_path = get_claude_settings_path();
+    let settings_path = get_claude_cometix_settings_path();
     if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).expect("create claude settings dir");
+        std::fs::create_dir_all(parent).expect("create Cometix settings dir");
     }
     let legacy_live = json!({
         "env": {
@@ -2572,19 +2735,19 @@ fn provider_service_switch_claude_updates_live_and_state() {
         &settings_path,
         serde_json::to_string_pretty(&legacy_live).expect("serialize legacy live"),
     )
-    .expect("seed claude live config");
+    .expect("seed Cometix live config");
 
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "old-provider".to_string();
         manager.providers.insert(
             "old-provider".to_string(),
             Provider::with_id(
                 "old-provider".to_string(),
-                "Legacy Claude".to_string(),
+                "Legacy Cometix".to_string(),
                 json!({
                     "env": { "ANTHROPIC_API_KEY": "stale-key" }
                 }),
@@ -2595,7 +2758,7 @@ fn provider_service_switch_claude_updates_live_and_state() {
             "new-provider".to_string(),
             Provider::with_id(
                 "new-provider".to_string(),
-                "Fresh Claude".to_string(),
+                "Fresh Cometix".to_string(),
                 json!({
                     "env": { "ANTHROPIC_API_KEY": "fresh-key" },
                     "workspace": { "path": "/tmp/new-workspace" }
@@ -2607,11 +2770,11 @@ fn provider_service_switch_claude_updates_live_and_state() {
 
     let state = create_test_state_with_config(&config).expect("create test state");
 
-    ProviderService::switch(&state, AppType::Claude, "new-provider")
+    ProviderService::switch(&state, AppType::ClaudeCometix, "new-provider")
         .expect("switch provider should succeed");
 
     let live_after: serde_json::Value =
-        read_json_file(&settings_path).expect("read claude live settings");
+        read_json_file(&settings_path).expect("read Cometix live settings");
     assert_eq!(
         live_after
             .get("env")
@@ -2623,11 +2786,11 @@ fn provider_service_switch_claude_updates_live_and_state() {
 
     let providers = state
         .db
-        .get_all_providers(AppType::Claude.as_str())
+        .get_all_providers(AppType::ClaudeCometix.as_str())
         .expect("get all providers");
     let current_id = state
         .db
-        .get_current_provider(AppType::Claude.as_str())
+        .get_current_provider(AppType::ClaudeCometix.as_str())
         .expect("get current provider");
     assert_eq!(
         current_id.as_deref(),
@@ -2767,17 +2930,18 @@ fn provider_service_switch_cometix_migrates_live_before_backfill() {
     );
 }
 
-/// 切走勾选了通用配置的 Claude 供应商时，应把它 live 里新增的可共享键
+/// 切走勾选了通用配置的 Cometix 供应商时，应把它 live 里新增的可共享键
 /// （用户直接在应用内装插件/改偏好）捕获进通用配置片段，并带到下一个供应商。
 #[test]
-fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
+fn switch_cometix_syncs_new_shared_keys_from_live_into_common_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
+    mark_cometix_live_migration_complete();
     let _home = ensure_test_home();
 
-    let settings_path = get_claude_settings_path();
+    let settings_path = get_claude_cometix_settings_path();
     if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).expect("create claude settings dir");
+        std::fs::create_dir_all(parent).expect("create Cometix settings dir");
     }
     // A 的 live = A 私有密钥（含非 Anthropic 的 OpenRouter 凭据）+ 已共享的 theme
     // + 用户刚在应用内新增的 enableAllProjectMcpServers
@@ -2790,13 +2954,13 @@ fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
         &settings_path,
         serde_json::to_string_pretty(&live).expect("serialize live"),
     )
-    .expect("seed claude live config");
+    .expect("seed Cometix live config");
 
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "a".to_string();
         let mut provider_a = Provider::with_id(
             "a".to_string(),
@@ -2826,17 +2990,17 @@ fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
     state
         .db
         .set_config_snippet(
-            AppType::Claude.as_str(),
+            AppType::ClaudeCometix.as_str(),
             Some(r#"{"theme":"dark"}"#.to_string()),
         )
         .expect("seed common config snippet");
 
-    ProviderService::switch(&state, AppType::Claude, "b").expect("switch should succeed");
+    ProviderService::switch(&state, AppType::ClaudeCometix, "b").expect("switch should succeed");
 
     // 片段应捕获到新增键，并保留已有共享键，且绝不含密钥
     let snippet = state
         .db
-        .get_config_snippet(AppType::Claude.as_str())
+        .get_config_snippet(AppType::ClaudeCometix.as_str())
         .expect("read snippet")
         .expect("snippet present");
     let snippet_value: serde_json::Value =
@@ -2894,14 +3058,15 @@ fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
 /// 用户在应用内删掉一个已共享的键后，切换应把删除同步进通用配置，
 /// 且不会在切到下一个供应商时被重新注入（否则会"删不掉"）。
 #[test]
-fn switch_claude_syncs_deletions_from_live_into_common_config() {
+fn switch_cometix_syncs_deletions_from_live_into_common_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
+    mark_cometix_live_migration_complete();
     let _home = ensure_test_home();
 
-    let settings_path = get_claude_settings_path();
+    let settings_path = get_claude_cometix_settings_path();
     if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).expect("create claude settings dir");
+        std::fs::create_dir_all(parent).expect("create Cometix settings dir");
     }
     // live 里 theme 还在，但用户已删掉 enableAllProjectMcpServers
     let live = json!({
@@ -2912,13 +3077,13 @@ fn switch_claude_syncs_deletions_from_live_into_common_config() {
         &settings_path,
         serde_json::to_string_pretty(&live).expect("serialize live"),
     )
-    .expect("seed claude live config");
+    .expect("seed Cometix live config");
 
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "a".to_string();
         let mut provider_a = Provider::with_id(
             "a".to_string(),
@@ -2949,16 +3114,16 @@ fn switch_claude_syncs_deletions_from_live_into_common_config() {
     state
         .db
         .set_config_snippet(
-            AppType::Claude.as_str(),
+            AppType::ClaudeCometix.as_str(),
             Some(r#"{"theme":"dark","enableAllProjectMcpServers":true}"#.to_string()),
         )
         .expect("seed common config snippet");
 
-    ProviderService::switch(&state, AppType::Claude, "b").expect("switch should succeed");
+    ProviderService::switch(&state, AppType::ClaudeCometix, "b").expect("switch should succeed");
 
     let snippet = state
         .db
-        .get_config_snippet(AppType::Claude.as_str())
+        .get_config_snippet(AppType::ClaudeCometix.as_str())
         .expect("read snippet")
         .expect("snippet present");
     let snippet_value: serde_json::Value =
@@ -3246,14 +3411,15 @@ wire_api = "responses"
 
 /// 未勾选"写入通用配置"的供应商，其 live 改动不应自动污染通用配置片段。
 #[test]
-fn switch_claude_does_not_sync_common_config_for_opted_out_provider() {
+fn switch_cometix_does_not_sync_common_config_for_opted_out_provider() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
+    mark_cometix_live_migration_complete();
     let _home = ensure_test_home();
 
-    let settings_path = get_claude_settings_path();
+    let settings_path = get_claude_cometix_settings_path();
     if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).expect("create claude settings dir");
+        std::fs::create_dir_all(parent).expect("create Cometix settings dir");
     }
     let live = json!({
         "env": { "ANTHROPIC_API_KEY": "a-key" },
@@ -3263,13 +3429,13 @@ fn switch_claude_does_not_sync_common_config_for_opted_out_provider() {
         &settings_path,
         serde_json::to_string_pretty(&live).expect("serialize live"),
     )
-    .expect("seed claude live config");
+    .expect("seed Cometix live config");
 
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "a".to_string();
         // A 未勾选通用配置（meta = None）
         manager.providers.insert(
@@ -3296,16 +3462,16 @@ fn switch_claude_does_not_sync_common_config_for_opted_out_provider() {
     state
         .db
         .set_config_snippet(
-            AppType::Claude.as_str(),
+            AppType::ClaudeCometix.as_str(),
             Some(r#"{"theme":"dark"}"#.to_string()),
         )
         .expect("seed common config snippet");
 
-    ProviderService::switch(&state, AppType::Claude, "b").expect("switch should succeed");
+    ProviderService::switch(&state, AppType::ClaudeCometix, "b").expect("switch should succeed");
 
     let snippet = state
         .db
-        .get_config_snippet(AppType::Claude.as_str())
+        .get_config_snippet(AppType::ClaudeCometix.as_str())
         .expect("read snippet")
         .expect("snippet present");
     let snippet_value: serde_json::Value =
@@ -3323,14 +3489,15 @@ fn switch_claude_does_not_sync_common_config_for_opted_out_provider() {
 
 /// 用户显式清空过通用配置（_cleared）后，切换不应把片段重新塞回来。
 #[test]
-fn switch_claude_respects_explicitly_cleared_common_config() {
+fn switch_cometix_respects_explicitly_cleared_common_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
+    mark_cometix_live_migration_complete();
     let _home = ensure_test_home();
 
-    let settings_path = get_claude_settings_path();
+    let settings_path = get_claude_cometix_settings_path();
     if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).expect("create claude settings dir");
+        std::fs::create_dir_all(parent).expect("create Cometix settings dir");
     }
     let live = json!({
         "env": { "ANTHROPIC_API_KEY": "a-key" },
@@ -3340,13 +3507,13 @@ fn switch_claude_respects_explicitly_cleared_common_config() {
         &settings_path,
         serde_json::to_string_pretty(&live).expect("serialize live"),
     )
-    .expect("seed claude live config");
+    .expect("seed Cometix live config");
 
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "a".to_string();
         let mut provider_a = Provider::with_id(
             "a".to_string(),
@@ -3375,15 +3542,15 @@ fn switch_claude_respects_explicitly_cleared_common_config() {
     let state = create_test_state_with_config(&config).expect("create test state");
     state
         .db
-        .set_config_snippet_cleared(AppType::Claude.as_str(), true)
+        .set_config_snippet_cleared(AppType::ClaudeCometix.as_str(), true)
         .expect("mark snippet cleared");
 
-    ProviderService::switch(&state, AppType::Claude, "b").expect("switch should succeed");
+    ProviderService::switch(&state, AppType::ClaudeCometix, "b").expect("switch should succeed");
 
     assert!(
         state
             .db
-            .get_config_snippet(AppType::Claude.as_str())
+            .get_config_snippet(AppType::ClaudeCometix.as_str())
             .expect("read snippet")
             .is_none(),
         "explicitly cleared snippet must not be resurrected by switch-away sync"
@@ -3398,7 +3565,7 @@ fn provider_service_switch_missing_provider_returns_error() {
 
     let state = create_test_state().expect("create test state");
 
-    let err = ProviderService::switch(&state, AppType::Claude, "missing")
+    let err = ProviderService::switch(&state, AppType::ClaudeCometix, "missing")
         .expect_err("switching missing provider should fail");
     match err {
         AppError::Message(msg) => {
@@ -3512,7 +3679,7 @@ fn provider_service_delete_codex_removes_provider_and_files() {
 }
 
 #[test]
-fn provider_service_delete_claude_removes_provider_files() {
+fn provider_service_delete_cometix_removes_provider_files() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
@@ -3520,8 +3687,8 @@ fn provider_service_delete_claude_removes_provider_files() {
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "keep".to_string();
         manager.providers.insert(
             "keep".to_string(),
@@ -3538,7 +3705,7 @@ fn provider_service_delete_claude_removes_provider_files() {
             "delete".to_string(),
             Provider::with_id(
                 "delete".to_string(),
-                "DeleteClaude".to_string(),
+                "DeleteCometix".to_string(),
                 json!({
                     "env": { "ANTHROPIC_API_KEY": "delete-key" }
                 }),
@@ -3547,25 +3714,26 @@ fn provider_service_delete_claude_removes_provider_files() {
         );
     }
 
-    let sanitized = sanitize_provider_name("DeleteClaude");
-    let claude_dir = home.join(".claude");
-    std::fs::create_dir_all(&claude_dir).expect("create claude dir");
-    let by_name = claude_dir.join(format!("settings-{sanitized}.json"));
-    let by_id = claude_dir.join("settings-delete.json");
+    let sanitized = sanitize_provider_name("DeleteCometix");
+    let cometix_dir = home.join(".hlclaude");
+    std::fs::create_dir_all(&cometix_dir).expect("create Cometix dir");
+    let by_name = cometix_dir.join(format!("settings-{sanitized}.json"));
+    let by_id = cometix_dir.join("settings-delete.json");
     std::fs::write(&by_name, "{}").expect("seed settings by name");
     std::fs::write(&by_id, "{}").expect("seed settings by id");
 
     let app_state = create_test_state_with_config(&config).expect("create test state");
 
-    ProviderService::delete(&app_state, AppType::Claude, "delete").expect("delete claude provider");
+    ProviderService::delete(&app_state, AppType::ClaudeCometix, "delete")
+        .expect("delete Cometix provider");
 
     let providers = app_state
         .db
-        .get_all_providers(AppType::Claude.as_str())
+        .get_all_providers(AppType::ClaudeCometix.as_str())
         .expect("get all providers");
     assert!(
         !providers.contains_key("delete"),
-        "claude provider should be removed"
+        "Cometix provider should be removed"
     );
     // v3.7.0+ 不再使用供应商特定文件（如 settings-*.json）
     // 删除供应商只影响数据库记录，不清理这些旧格式文件
@@ -3580,8 +3748,8 @@ fn provider_service_delete_current_provider_returns_error() {
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "keep".to_string();
         manager.providers.insert(
             "keep".to_string(),
@@ -3598,7 +3766,7 @@ fn provider_service_delete_current_provider_returns_error() {
 
     let app_state = create_test_state_with_config(&config).expect("create test state");
 
-    let err = ProviderService::delete(&app_state, AppType::Claude, "keep")
+    let err = ProviderService::delete(&app_state, AppType::ClaudeCometix, "keep")
         .expect_err("deleting current provider should fail");
     match err {
         AppError::Localized { zh, .. } => assert!(
@@ -3621,7 +3789,7 @@ fn provider_service_delete_current_provider_returns_error() {
 }
 
 #[test]
-fn recover_from_crash_without_backup_cleans_placeholder_instead_of_writing_it_back() {
+fn recover_from_crash_leaves_official_claude_placeholder_untouched() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
@@ -3664,17 +3832,8 @@ fn recover_from_crash_without_backup_cleans_placeholder_instead_of_writing_it_ba
 
     let live_after: serde_json::Value =
         read_json_file(&settings_path).expect("read live settings after recovery");
-    let env = live_after.get("env").cloned().unwrap_or_else(|| json!({}));
-    assert_ne!(
-        env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()),
-        Some("PROXY_MANAGED"),
-        "recovery must not write the placeholder back to live"
-    );
-    assert!(
-        env.get("ANTHROPIC_BASE_URL")
-            .and_then(|v| v.as_str())
-            .map(|url| !url.starts_with("http://127.0.0.1"))
-            .unwrap_or(true),
-        "recovery must drop the local proxy base URL"
+    assert_eq!(
+        live_after, taken_over_live,
+        "the private fork must not clean, restore, or otherwise rewrite official Claude live state"
     );
 }

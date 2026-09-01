@@ -610,6 +610,13 @@ impl AppSettings {
     }
 
     fn normalize_paths(&mut self) {
+        if matches!(self.skill_storage_location, SkillStorageLocation::Unified) {
+            log::warn!(
+                "私有版不再使用共享的 ~/.agents/skills；Skill 存储已切回独立的 CC Switch Cometix 目录"
+            );
+            self.skill_storage_location = SkillStorageLocation::CcSwitch;
+        }
+
         self.claude_config_dir = self
             .claude_config_dir
             .as_ref()
@@ -626,7 +633,7 @@ impl AppSettings {
 
         if validate_claude_directory_isolation(self).is_err() {
             log::error!(
-                "检测到 Claude/Cometix 配置目录相互重合或侵入应用数据目录，已恢复各自独立的默认目录"
+                "检测到 Claude/Cometix 配置目录相互重合或侵入应用数据目录，已清除自定义目录；若默认目录仍冲突，Cometix 写操作将保持禁用"
             );
             self.claude_config_dir = None;
             self.claude_cometix_config_dir = None;
@@ -759,20 +766,46 @@ fn validate_claude_directories_against_app_root(
     Ok(())
 }
 
-pub(crate) fn validate_claude_directory_isolation(settings: &AppSettings) -> Result<(), AppError> {
+fn validate_claude_directory_isolation_with_wsl_home(
+    settings: &AppSettings,
+    home: &Path,
+    wsl_home: Option<&Path>,
+    desktop_roots: Vec<PathBuf>,
+) -> Result<(), AppError> {
     let (official, cometix) = effective_claude_directories(settings);
-    if crate::app_store::paths_overlap(&official, &cometix) {
+    let default_official = home.join(".claude");
+    if crate::app_store::paths_overlap(&official, &cometix)
+        || crate::app_store::paths_overlap(&default_official, &cometix)
+    {
         return Err(AppError::localized(
             "settings.claude_cometix_dir.conflict",
             "Claude Code（Cometix）的配置目录不能与官方 Claude Code 相同或相互嵌套",
             "Claude Code (Cometix) and official Claude Code configuration directories cannot be the same or nested inside each other.",
         ));
     }
-    validate_claude_directories_against_app_root(
-        settings,
-        &crate::config::get_home_dir().join(".cc-switch"),
-    )?;
+    validate_claude_directories_against_app_root(settings, &home.join(".cc-switch"))?;
     validate_claude_directories_against_app_root(settings, &crate::config::get_app_config_dir())?;
+    let protected_roots = crate::fork_policy::cometix_protected_roots_with_wsl_home(
+        home,
+        &official,
+        wsl_home,
+        desktop_roots,
+    );
+    crate::fork_policy::ensure_cometix_paths_isolated(&official, &cometix, &protected_roots)?;
+    Ok(())
+}
+
+pub(crate) fn validate_claude_directory_isolation(settings: &AppSettings) -> Result<(), AppError> {
+    let home = crate::config::get_home_dir();
+    let desktop_roots =
+        crate::claude_desktop_config::get_protected_config_roots().unwrap_or_default();
+    validate_claude_directory_isolation_with_wsl_home(settings, &home, None, desktop_roots)?;
+
+    // The settings write is a mutation boundary. A WSL UNC override must be
+    // probed and inspected inside its distro here, before it can be persisted;
+    // host-side UNC canonicalization cannot reliably follow Linux symlinks.
+    let (official, cometix) = effective_claude_directories(settings);
+    crate::fork_policy::ensure_cometix_config_paths_isolated(&official, &cometix)?;
     Ok(())
 }
 
@@ -792,6 +825,7 @@ fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
     let Some(path) = AppSettings::settings_path() else {
         return Err(AppError::Config("无法获取用户主目录".to_string()));
     };
+    crate::app_store::ensure_private_app_data_path_isolated(&path)?;
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
@@ -873,6 +907,7 @@ pub fn get_settings_for_frontend() -> AppSettings {
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     validate_claude_directory_isolation(&new_settings)?;
+    ensure_private_skill_storage_location(new_settings.skill_storage_location)?;
     new_settings.normalize_paths();
     save_settings_file(&new_settings)?;
 
@@ -1210,19 +1245,77 @@ pub fn get_skill_sync_method() -> SyncMethod {
 
 // ===== Skill 存储位置管理函数 =====
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SKILL_STORAGE_LOCATION: std::cell::Cell<Option<SkillStorageLocation>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn replace_test_skill_storage_location(
+    location: Option<SkillStorageLocation>,
+) -> Option<SkillStorageLocation> {
+    TEST_SKILL_STORAGE_LOCATION.with(|slot| slot.replace(location))
+}
+
+#[cfg(test)]
+fn test_skill_storage_location() -> Option<SkillStorageLocation> {
+    TEST_SKILL_STORAGE_LOCATION.with(std::cell::Cell::get)
+}
+
+pub(crate) fn ensure_private_skill_storage_location(
+    location: SkillStorageLocation,
+) -> Result<(), AppError> {
+    #[cfg(test)]
+    if test_skill_storage_location().is_some() {
+        return Ok(());
+    }
+
+    if matches!(location, SkillStorageLocation::Unified) {
+        return Err(AppError::localized(
+            "settings.skill_storage.shared_disabled",
+            "此魔改版仅使用独立的 Skill 存储，不能修改官方 Claude 也会读取的 ~/.agents/skills",
+            "This private build only uses isolated Skill storage and cannot modify ~/.agents/skills, which official Claude may also read.",
+        ));
+    }
+    Ok(())
+}
+
 /// 获取 Skill 存储位置配置
 pub fn get_skill_storage_location() -> SkillStorageLocation {
-    settings_store()
+    #[cfg(test)]
+    if let Some(location) = test_skill_storage_location() {
+        return location;
+    }
+
+    let configured = settings_store()
         .read()
         .unwrap_or_else(|e| {
             log::warn!("设置锁已毒化，使用恢复值: {e}");
             e.into_inner()
         })
-        .skill_storage_location
+        .skill_storage_location;
+    match configured {
+        SkillStorageLocation::CcSwitch => SkillStorageLocation::CcSwitch,
+        SkillStorageLocation::Unified => {
+            log::warn!(
+                "忽略共享的 Unified Skill 存储设置；私有版固定使用 CC Switch Cometix 独立目录"
+            );
+            SkillStorageLocation::CcSwitch
+        }
+    }
 }
 
 /// 设置 Skill 存储位置
 pub fn set_skill_storage_location(location: SkillStorageLocation) -> Result<(), AppError> {
+    ensure_private_skill_storage_location(location)?;
+
+    #[cfg(test)]
+    if test_skill_storage_location().is_some() {
+        TEST_SKILL_STORAGE_LOCATION.with(|slot| slot.set(Some(location)));
+        return Ok(());
+    }
+
     mutate_settings(|s| {
         s.skill_storage_location = location;
     })
@@ -1318,6 +1411,31 @@ mod tests {
     use crate::app_config::AppType;
 
     #[test]
+    fn legacy_unified_skill_storage_normalizes_to_private_storage() {
+        let mut settings = AppSettings {
+            skill_storage_location: SkillStorageLocation::Unified,
+            ..Default::default()
+        };
+
+        settings.normalize_paths();
+
+        assert_eq!(
+            settings.skill_storage_location,
+            SkillStorageLocation::CcSwitch
+        );
+    }
+
+    #[test]
+    fn private_build_rejects_shared_skill_storage() {
+        let previous = replace_test_skill_storage_location(None);
+        let result = ensure_private_skill_storage_location(SkillStorageLocation::Unified);
+        replace_test_skill_storage_location(previous);
+
+        let error = result.expect_err("shared Skill storage must be rejected");
+        assert!(error.to_string().contains("~/.agents/skills"));
+    }
+
+    #[test]
     fn cometix_directory_override_is_normalized_independently() {
         let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
             "claudeConfigDir": " /profiles/official ",
@@ -1365,6 +1483,45 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_claude_directory_isolation(&official_inside_cometix).is_err());
+    }
+
+    #[test]
+    fn cometix_directory_cannot_overlap_the_selected_wsl_home_official_data() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let host_home = temp.path().join("host");
+        let wsl_home = temp.path().join("wsl-home");
+        let settings = AppSettings {
+            claude_config_dir: Some(host_home.join(".claude").display().to_string()),
+            claude_cometix_config_dir: Some(
+                wsl_home.join(".claude/projects").display().to_string(),
+            ),
+            ..Default::default()
+        };
+
+        assert!(validate_claude_directory_isolation_with_wsl_home(
+            &settings,
+            &host_home,
+            Some(&wsl_home),
+            Vec::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn custom_legacy_official_override_does_not_unprotect_default_claude_root() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let settings = AppSettings {
+            claude_config_dir: Some(temp.path().join("legacy-official").display().to_string()),
+            claude_cometix_config_dir: Some(
+                crate::config::get_home_dir()
+                    .join(".claude")
+                    .display()
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        assert!(validate_claude_directory_isolation(&settings).is_err());
     }
 
     #[test]

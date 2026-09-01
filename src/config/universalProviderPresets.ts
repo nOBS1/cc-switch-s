@@ -1,7 +1,7 @@
 /**
  * 统一供应商（Universal Provider）预设配置
  *
- * 统一供应商是跨应用共享的配置，修改后会自动同步到 Claude、Codex、Gemini 三个应用。
+ * 统一供应商是跨应用共享的配置；私有分支仅同步到 Codex 与 Gemini。
  * 适用于 NewAPI 等支持多种协议的 API 网关。
  */
 
@@ -40,12 +40,6 @@ export interface UniversalProviderPreset {
  * NewAPI 默认模型配置
  */
 const NEWAPI_DEFAULT_MODELS: UniversalProviderModels = {
-  claude: {
-    model: "claude-sonnet-5",
-    haikuModel: "claude-haiku-4-5-20251001",
-    sonnetModel: "claude-sonnet-5",
-    opusModel: "claude-opus-5",
-  },
   codex: {
     model: "gpt-5.6-sol",
     reasoningEffort: "high",
@@ -63,7 +57,7 @@ export const universalProviderPresets: UniversalProviderPreset[] = [
     name: "NewAPI",
     providerType: "newapi",
     defaultApps: {
-      claude: true,
+      claude: false,
       codex: true,
       gemini: true,
     },
@@ -78,7 +72,7 @@ export const universalProviderPresets: UniversalProviderPreset[] = [
     name: "自定义网关",
     providerType: "custom_gateway",
     defaultApps: {
-      claude: true,
+      claude: false,
       codex: true,
       gemini: true,
     },
@@ -100,7 +94,7 @@ export function createUniversalProviderFromPreset(
   apiKey: string,
   customName?: string,
 ): UniversalProvider {
-  return {
+  return sanitizePrivateForkUniversalProvider({
     id,
     name: customName || preset.name,
     providerType: preset.providerType,
@@ -112,6 +106,26 @@ export function createUniversalProviderFromPreset(
     icon: preset.icon,
     iconColor: preset.iconColor,
     createdAt: Date.now(),
+  });
+}
+
+/**
+ * Strip the upstream-only Claude assignment before a universal provider can be
+ * persisted or synced by this private fork. Cometix is intentionally not a
+ * universal-provider target; it has its own independent provider domain.
+ */
+export function sanitizePrivateForkUniversalProvider(
+  provider: UniversalProvider,
+): UniversalProvider {
+  const { claude: _officialClaudeModel, ...managedModels } = provider.models;
+
+  return {
+    ...provider,
+    apps: {
+      ...provider.apps,
+      claude: false,
+    },
+    models: managedModels,
   };
 }
 

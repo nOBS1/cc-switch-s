@@ -139,15 +139,16 @@ const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
 
 const STORAGE_KEY = "cc-switch-last-app";
+const DEFAULT_MANAGEMENT_APP: AppId = "claude-cometix";
 const getInitialApp = (): AppId => {
   const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
   if (saved && APP_IDS.includes(saved) && isManagementApp(saved)) {
     return saved;
   }
-  if (saved === "claude-desktop") {
-    localStorage.setItem(STORAGE_KEY, "claude");
+  if (saved === "claude" || saved === "claude-desktop") {
+    localStorage.setItem(STORAGE_KEY, DEFAULT_MANAGEMENT_APP);
   }
-  return "claude";
+  return DEFAULT_MANAGEMENT_APP;
 };
 
 const VIEW_STORAGE_KEY = "cc-switch-last-view";
@@ -222,12 +223,12 @@ function App() {
   const getFirstVisibleApp = (): AppId => {
     return (
       APP_IDS.find((app) => isManagementApp(app) && visibleApps[app]) ??
-      "claude"
+      DEFAULT_MANAGEMENT_APP
     );
   };
 
   useEffect(() => {
-    if (!visibleApps[activeApp]) {
+    if (!isManagementApp(activeApp) || !visibleApps[activeApp]) {
       setActiveApp(getFirstVisibleApp());
     }
   }, [visibleApps, activeApp]);

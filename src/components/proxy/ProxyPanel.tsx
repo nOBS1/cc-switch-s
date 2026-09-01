@@ -73,9 +73,8 @@ export function ProxyPanel({
     }
   }, [globalConfig]);
 
-  // 获取所有三个应用类型的故障转移队列
+  // 获取此私有分支允许管理的应用故障转移队列
   // 启用自动故障转移后，将按队列优先级（P1→P2→...）选择供应商
-  const { data: claudeQueue = [] } = useFailoverQueue("claude");
   const { data: codexQueue = [] } = useFailoverQueue("codex");
   const { data: geminiQueue = [] } = useFailoverQueue("gemini");
   const { data: grokQueue = [] } = useFailoverQueue("grokbuild");
@@ -417,8 +416,7 @@ export function ProxyPanel({
               </div>
 
               {/* [6] Provider queues */}
-              {(claudeQueue.length > 0 ||
-                codexQueue.length > 0 ||
+              {(codexQueue.length > 0 ||
                 geminiQueue.length > 0 ||
                 grokQueue.length > 0) && (
                 <div className="pt-3 border-t border-border space-y-3">
@@ -428,18 +426,6 @@ export function ProxyPanel({
                       {t("proxy.failoverQueue.title")}
                     </p>
                   </div>
-
-                  {claudeQueue.length > 0 && (
-                    <ProviderQueueGroup
-                      appType="claude"
-                      appLabel="Claude"
-                      targets={claudeQueue.map((item) => ({
-                        id: item.providerId,
-                        name: item.providerName,
-                      }))}
-                      status={status}
-                    />
-                  )}
 
                   {codexQueue.length > 0 && (
                     <ProviderQueueGroup

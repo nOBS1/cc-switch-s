@@ -85,6 +85,13 @@ function scopedSkillSupportsApp(skill: InstalledSkill, app: AppId): boolean {
   return true;
 }
 
+function isOfficialOnlySkill(skill: InstalledSkill): boolean {
+  return (
+    Boolean(skill.apps.claude) &&
+    !SKILLS_APP_IDS.some((app) => Boolean(skill.apps[app]))
+  );
+}
+
 function formatSkillBackupDate(unixSeconds: number): string {
   const date = new Date(unixSeconds * 1000);
   return Number.isNaN(date.getTime())
@@ -176,7 +183,11 @@ const UnifiedSkillsPanel = React.forwardRef<
     [onInteractionBlockedChange, onNavigationBlockedChange],
   );
 
-  const hasSkills = (skills?.length ?? 0) > 0;
+  const visibleSkills = useMemo(
+    () => (skills ?? []).filter((skill) => !isOfficialOnlySkill(skill)),
+    [skills],
+  );
+  const hasSkills = visibleSkills.length > 0;
 
   React.useEffect(() => {
     onCheckUpdatesStateChange?.({
@@ -212,9 +223,9 @@ const UnifiedSkillsPanel = React.forwardRef<
   };
 
   const applicableSkillUpdates = useMemo(() => {
-    const installedIds = new Set((skills ?? []).map((skill) => skill.id));
+    const installedIds = new Set(visibleSkills.map((skill) => skill.id));
     return (skillUpdates ?? []).filter((update) => installedIds.has(update.id));
-  }, [skillUpdates, skills]);
+  }, [skillUpdates, visibleSkills]);
 
   const updatesMap = useMemo(() => {
     const map: Record<string, SkillUpdateInfo> = {};
@@ -237,8 +248,7 @@ const UnifiedSkillsPanel = React.forwardRef<
       hermes: 0,
       pi: 0,
     };
-    if (!skills) return counts;
-    skills.forEach((skill) => {
+    visibleSkills.forEach((skill) => {
       for (const app of SKILLS_APP_IDS) {
         if (skill.apps[app]) {
           counts[app]++;
@@ -246,15 +256,13 @@ const UnifiedSkillsPanel = React.forwardRef<
       }
     });
     return counts;
-  }, [skills]);
+  }, [visibleSkills]);
 
   const filteredSkills = useMemo(() => {
-    if (!skills) return [];
-
     const query = searchQuery.trim().toLocaleLowerCase();
-    if (!query) return skills;
+    if (!query) return visibleSkills;
 
-    return skills.filter((skill) => {
+    return visibleSkills.filter((skill) => {
       const searchableValues = [
         skill.name,
         skill.id,
@@ -271,7 +279,7 @@ const UnifiedSkillsPanel = React.forwardRef<
         value?.toLocaleLowerCase().includes(query),
       );
     });
-  }, [searchQuery, skills]);
+  }, [searchQuery, visibleSkills]);
 
   const pendingApp = bulkToggleAppMutation.isPending
     ? bulkToggleAppMutation.variables?.app
@@ -292,9 +300,9 @@ const UnifiedSkillsPanel = React.forwardRef<
   };
 
   const handleToggleAll = async (app: AppId, enabled: boolean) => {
-    if (!skills || !beginWrite()) return;
+    if (!beginWrite()) return;
 
-    const ids = skills
+    const ids = visibleSkills
       .filter(
         (skill) =>
           scopedSkillSupportsApp(skill, app) &&
@@ -642,10 +650,10 @@ const UnifiedSkillsPanel = React.forwardRef<
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0 flex-1">
           <AppCountBar
-            totalLabel={t("skills.installed", { count: skills?.length || 0 })}
+            totalLabel={t("skills.installed", { count: visibleSkills.length })}
             counts={enabledCounts}
             appIds={visibleSkillAppIds}
-            totalCount={skills?.length ?? 0}
+            totalCount={visibleSkills.length}
             onToggleAll={handleToggleAll}
             pendingApp={pendingApp}
             disabled={interactionBlocked}
@@ -694,7 +702,7 @@ const UnifiedSkillsPanel = React.forwardRef<
             <div className="text-center py-12 text-muted-foreground">
               {t("skills.loading")}
             </div>
-          ) : !skills || skills.length === 0 ? (
+          ) : visibleSkills.length === 0 ? (
             <div className="text-center py-12">
               <div className="w-16 h-16 mx-auto mb-4 bg-muted rounded-full flex items-center justify-center">
                 <Sparkles size={24} className="text-muted-foreground" />
@@ -1063,7 +1071,9 @@ const ImportSkillsDialog: React.FC<ImportSkillsDialogProps> = ({
       skills.map((skill) => [
         skill.directory,
         {
-          claude: skill.foundIn.includes("claude"),
+          // Official Claude belongs to the upstream app and is never a
+          // writable import target in this private fork.
+          claude: false,
           "claude-cometix": skill.foundIn.includes("claude-cometix"),
           codex: skill.foundIn.includes("codex"),
           gemini: skill.foundIn.includes("gemini"),

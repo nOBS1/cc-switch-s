@@ -7,12 +7,12 @@ mod support;
 use support::{ensure_test_home, reset_test_fs, test_mutex};
 
 #[test]
-fn deeplink_import_claude_provider_persists_to_db() {
+fn deeplink_import_cometix_provider_persists_to_private_db() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let url = "ccswitch://v1/import?resource=provider&app=claude&name=DeepLink%20Claude&homepage=https%3A%2F%2Fexample.com&endpoint=https%3A%2F%2Fapi.example.com%2Fv1&apiKey=sk-test-claude-key&model=claude-sonnet-4&icon=claude";
+    let url = "ccswitch://v1/import?resource=provider&app=claude-cometix&name=DeepLink%20Cometix&homepage=https%3A%2F%2Fexample.com&endpoint=https%3A%2F%2Fapi.example.com%2Fv1&apiKey=sk-test-claude-key&model=claude-sonnet-4&icon=claude";
     let request = parse_deeplink_url(url).expect("parse deeplink url");
 
     let db = Arc::new(Database::memory().expect("create memory db"));
@@ -22,7 +22,9 @@ fn deeplink_import_claude_provider_persists_to_db() {
         .expect("import provider from deeplink");
 
     // Verify DB state
-    let providers = db.get_all_providers("claude").expect("get providers");
+    let providers = db
+        .get_all_providers("claude-cometix")
+        .expect("get Cometix providers");
     let provider = providers
         .get(&provider_id)
         .expect("provider created via deeplink");
@@ -40,6 +42,39 @@ fn deeplink_import_claude_provider_persists_to_db() {
         .and_then(|v| v.as_str());
     assert_eq!(auth_token, request.api_key.as_deref());
     assert_eq!(base_url, request.endpoint.as_deref());
+}
+
+#[test]
+fn deeplink_import_rejects_official_claude_without_persisting() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let request = parse_deeplink_url(
+        "ccswitch://v1/import?resource=provider&app=claude&name=Official%20Claude&endpoint=https%3A%2F%2Fapi.example.com%2Fv1&apiKey=sk-test-official-key",
+    )
+    .expect("parse official Claude deeplink");
+    let db = Arc::new(Database::memory().expect("create memory db"));
+    let state = AppState::new(db.clone());
+    let before_ids: Vec<_> = db
+        .get_all_providers("claude")
+        .expect("query official providers before import")
+        .keys()
+        .cloned()
+        .collect();
+
+    let error = import_provider_from_deeplink(&state, request)
+        .expect_err("private build must reject official Claude import");
+
+    assert!(error.to_string().contains("Official Claude Code"));
+    assert_eq!(
+        db.get_all_providers("claude")
+            .expect("query official providers after import")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        before_ids
+    );
 }
 
 #[test]

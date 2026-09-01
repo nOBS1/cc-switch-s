@@ -69,6 +69,12 @@ const extractCodexPromptFromIdeContext = (content: string) => {
 export const getSessionKey = (session: SessionMeta) =>
   `${session.providerId}:${session.sessionId}:${session.sourcePath ?? ""}`;
 
+/** Official Claude history is intentionally view-only in the private build. */
+export const isSessionResumable = (
+  session: SessionMeta,
+): session is SessionMeta & { resumeCommand: string } =>
+  session.providerId !== "claude" && Boolean(session.resumeCommand);
+
 export const getSessionDirectoryGroupKey = (
   providerId: string,
   projectDir?: string | null,

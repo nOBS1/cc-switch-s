@@ -2,6 +2,11 @@
 
 use crate::config::ConfigStatus;
 
+fn ensure_official_claude_write_allowed() -> Result<(), String> {
+    crate::fork_policy::ensure_app_management_allowed(&crate::app_config::AppType::Claude)
+        .map_err(|e| e.to_string())
+}
+
 /// Claude 插件：获取 ~/.claude/config.json 状态
 #[tauri::command]
 pub async fn get_claude_plugin_status() -> Result<ConfigStatus, String> {
@@ -22,6 +27,7 @@ pub async fn read_claude_plugin_config() -> Result<Option<String>, String> {
 /// Claude 插件：写入/清除固定配置
 #[tauri::command]
 pub async fn apply_claude_plugin_config(official: bool) -> Result<bool, String> {
+    ensure_official_claude_write_allowed()?;
     if official {
         crate::claude_plugin::clear_claude_config().map_err(|e| e.to_string())
     } else {
@@ -38,11 +44,23 @@ pub async fn is_claude_plugin_applied() -> Result<bool, String> {
 /// Claude Code：跳过初次安装确认（写入 ~/.claude.json 的 hasCompletedOnboarding=true）
 #[tauri::command]
 pub async fn apply_claude_onboarding_skip() -> Result<bool, String> {
+    ensure_official_claude_write_allowed()?;
     crate::claude_mcp::set_has_completed_onboarding().map_err(|e| e.to_string())
 }
 
 /// Claude Code：恢复初次安装确认（删除 ~/.claude.json 的 hasCompletedOnboarding 字段）
 #[tauri::command]
 pub async fn clear_claude_onboarding_skip() -> Result<bool, String> {
+    ensure_official_claude_write_allowed()?;
     crate::claude_mcp::clear_has_completed_onboarding().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_official_claude_write_allowed;
+
+    #[test]
+    fn private_fork_rejects_official_claude_plugin_and_onboarding_writes() {
+        assert!(ensure_official_claude_write_allowed().is_err());
+    }
 }

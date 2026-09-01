@@ -141,6 +141,7 @@ pub fn maybe_migrate_codex_third_party_history_provider_bucket(
     }
 
     let backup_root = migration_backup_root(MIGRATION_NAME);
+    crate::app_store::ensure_private_app_data_path_isolated(&backup_root)?;
     let codex_dir = get_codex_config_dir();
     let migrated_jsonl_files =
         migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)?;
@@ -178,6 +179,7 @@ pub fn maybe_migrate_codex_provider_template_bucket(
     }
 
     let backup_root = migration_backup_root(MIGRATION_NAME);
+    crate::app_store::ensure_private_app_data_path_isolated(&backup_root)?;
     let outcome = migrate_codex_provider_templates_to_custom(db, &backup_root)?;
     crate::settings::mark_codex_provider_template_migrated(CodexProviderTemplateMigration {
         completed_at: Utc::now().to_rfc3339(),
@@ -237,6 +239,7 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
     let source_provider_ids: BTreeSet<String> =
         std::iter::once(OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID.to_string()).collect();
     let backup_root = migration_backup_root(OFFICIAL_UNIFY_MIGRATION_NAME);
+    crate::app_store::ensure_private_app_data_path_isolated(&backup_root)?;
     let migrated_jsonl_files =
         migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)?;
     let migrated_state_rows =
@@ -299,13 +302,16 @@ fn canonical_dir_string(dir: &Path) -> String {
 /// 在备份代际根目录写入 meta.json，记录这批备份来自哪个 Codex 目录。
 /// 代际目录不存在（本轮没有任何文件被迁移）时跳过。
 fn write_backup_generation_meta(backup_root: &Path, codex_dir_key: &str) -> Result<(), AppError> {
+    crate::app_store::ensure_private_app_data_path_isolated(backup_root)?;
     if !backup_root.exists() {
         return Ok(());
     }
     let payload = serde_json::json!({ "codexConfigDir": codex_dir_key });
     let bytes =
         serde_json::to_vec_pretty(&payload).map_err(|e| AppError::JsonSerialize { source: e })?;
-    atomic_write(&backup_root.join("meta.json"), &bytes)
+    let meta_path = backup_root.join("meta.json");
+    ensure_private_backup_target(&meta_path, backup_root)?;
+    atomic_write(&meta_path, &bytes)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -327,8 +333,12 @@ fn official_history_unify_backup_parent() -> PathBuf {
 /// 代际，避免切换 codex_config_dir 后弹出注定空跑的勾选。
 /// 精确账本内容仍在真正还原时才解析。
 pub fn has_codex_official_history_unify_backup() -> bool {
+    let parent = official_history_unify_backup_parent();
+    if crate::app_store::ensure_private_app_data_path_isolated(&parent).is_err() {
+        return false;
+    }
     has_official_history_unify_backup_for_dir(
-        &official_history_unify_backup_parent(),
+        &parent,
         &canonical_dir_string(&get_codex_config_dir()),
     )
 }
@@ -365,10 +375,14 @@ pub fn restore_codex_official_history_from_backups(
         });
     }
     let config_text = read_codex_config_text().unwrap_or_default();
+    let ledger_parent = official_history_unify_backup_parent();
+    let restore_backup_root = migration_backup_root(OFFICIAL_UNIFY_RESTORE_BACKUP_NAME);
+    crate::app_store::ensure_private_app_data_path_isolated(&ledger_parent)?;
+    crate::app_store::ensure_private_app_data_path_isolated(&restore_backup_root)?;
     restore_codex_official_history_inner(
         &get_codex_config_dir(),
-        &official_history_unify_backup_parent(),
-        &migration_backup_root(OFFICIAL_UNIFY_RESTORE_BACKUP_NAME),
+        &ledger_parent,
+        &restore_backup_root,
         &config_text,
     )
 }
@@ -1184,7 +1198,7 @@ fn backup_codex_jsonl_file(
     let backup_path = backup_root
         .join("jsonl")
         .join(relative_backup_path(path, codex_dir));
-    copy_existing_file(path, &backup_path)
+    copy_existing_file(path, &backup_path, backup_root)
 }
 
 fn backup_codex_state_db(
@@ -1196,9 +1210,12 @@ fn backup_codex_state_db(
     let backup_path = backup_root
         .join("state")
         .join(relative_backup_path(db_path, codex_dir));
+    ensure_private_backup_target(&backup_path, backup_root)?;
     if let Some(parent) = backup_path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        ensure_private_backup_target(parent, backup_root)?;
     }
+    ensure_private_backup_target(&backup_path, backup_root)?;
 
     let mut backup_conn = Connection::open(&backup_path)
         .map_err(|e| AppError::Database(format!("创建 Codex state DB 备份失败: {e}")))?;
@@ -1218,8 +1235,10 @@ fn backup_provider_settings_config(
     let backup_path = backup_root
         .join("providers")
         .join(provider_settings_backup_filename(provider_id));
+    ensure_private_backup_target(&backup_path, backup_root)?;
     if let Some(parent) = backup_path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        ensure_private_backup_target(parent, backup_root)?;
     }
 
     let payload = serde_json::json!({
@@ -1228,6 +1247,7 @@ fn backup_provider_settings_config(
     });
     let bytes =
         serde_json::to_vec_pretty(&payload).map_err(|e| AppError::JsonSerialize { source: e })?;
+    ensure_private_backup_target(&backup_path, backup_root)?;
     atomic_write(&backup_path, &bytes)
 }
 
@@ -1256,11 +1276,48 @@ fn provider_settings_backup_filename(provider_id: &str) -> String {
     format!("{hash}-{safe_id}.settings_config.json")
 }
 
-fn copy_existing_file(source: &Path, target: &Path) -> Result<(), AppError> {
+fn copy_existing_file(source: &Path, target: &Path, backup_root: &Path) -> Result<(), AppError> {
+    ensure_private_backup_target(target, backup_root)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        ensure_private_backup_target(parent, backup_root)?;
     }
+    ensure_private_backup_target(target, backup_root)?;
     copy_file(source, target)
+}
+
+#[cfg(test)]
+fn ensure_backup_path_isolated(path: &Path, backup_root: &Path) -> Result<(), AppError> {
+    if crate::app_store::path_is_same_or_nested(backup_root, &crate::config::get_app_config_dir()) {
+        crate::app_store::ensure_private_app_data_path_isolated(path)
+    } else {
+        crate::app_store::ensure_private_app_data_path_isolated_for_test(path, backup_root)
+    }
+}
+
+#[cfg(not(test))]
+fn ensure_backup_path_isolated(path: &Path, _backup_root: &Path) -> Result<(), AppError> {
+    crate::app_store::ensure_private_app_data_path_isolated(path)
+}
+
+fn ensure_private_backup_target(path: &Path, backup_root: &Path) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        ensure_backup_path_isolated(parent, backup_root)?;
+    }
+    ensure_backup_path_isolated(path, backup_root)?;
+
+    // SQLite may create these siblings while opening a backup database. Guard
+    // them even when they do not exist yet so an aliased sidecar cannot become
+    // an unvalidated write target.
+    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            ensure_backup_path_isolated(
+                &path.with_file_name(format!("{file_name}{suffix}")),
+                backup_root,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn relative_backup_path(path: &Path, root: &Path) -> PathBuf {

@@ -193,6 +193,16 @@ fn plan_toggles(
 pub struct ProfileService;
 
 impl ProfileService {
+    /// Profile 创建、重拍和应用都是管理操作。先在任何 DB、代理或
+    /// live 状态变更前检查整个 scope，避免官方 Claude 被部分切换后才因
+    /// live 写入守卫拒绝，留下不一致的私有 DB current/pointer。
+    fn ensure_scope_management_allowed(scope: ProfileScope) -> Result<(), AppError> {
+        for app in scope.apps() {
+            crate::fork_policy::ensure_app_management_allowed(app)?;
+        }
+        Ok(())
+    }
+
     /// 抓取分组内应用的当前配置状态生成快照（组外槽位保持默认值）
     pub fn snapshot_current(
         state: &AppState,
@@ -244,6 +254,8 @@ impl ProfileService {
     /// 创建新项目：只拍发起页所属分组的当前状态，其余分组槽位留 None
     /// （其他应用可能正处于别的项目，不能替用户拍进来）
     pub fn create(state: &AppState, name: &str, scope: ProfileScope) -> Result<Profile, AppError> {
+        Self::ensure_scope_management_allowed(scope)?;
+
         let name = name.trim();
         if name.is_empty() {
             return Err(AppError::InvalidInput("Profile name is empty".to_string()));
@@ -289,6 +301,8 @@ impl ProfileService {
             let scope = scope.ok_or_else(|| {
                 AppError::InvalidInput("Resnapshot requires a profile scope".to_string())
             })?;
+            Self::ensure_scope_management_allowed(scope)?;
+
             let mut payload: ProfilePayload = serde_json::from_str(&profile.payload)
                 .map_err(|e| AppError::Config(format!("解析 profile payload 失败: {e}")))?;
             payload.merge_scope_from(&Self::snapshot_current(state, scope)?, scope);
@@ -332,6 +346,8 @@ impl ProfileService {
         profile_id: &str,
         scope: ProfileScope,
     ) -> Result<(Vec<String>, bool), AppError> {
+        Self::ensure_scope_management_allowed(scope)?;
+
         let mut warnings = Vec::new();
 
         // 自动保存旧项目当前状态（仅当前分组），失败不阻塞切换

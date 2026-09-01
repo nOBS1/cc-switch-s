@@ -11,7 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import { isManagementApp } from "@/utils/forkPolicy";
 import { GitFork, MoreHorizontal, Terminal } from "lucide-react";
-import { APP_IDS } from "@/config/appConfig";
+import { MANAGEMENT_APP_IDS } from "@/config/appConfig";
 
 const APP_BADGE_ICON: Partial<
   Record<AppId, { icon: typeof Terminal; offsetY?: number }>
@@ -110,8 +110,7 @@ export function AppSwitcher({
   };
 
   // Filter apps based on visibility settings (default all visible)
-  const appsToShow = APP_IDS.filter((app) => {
-    if (!isManagementApp(app)) return false;
+  const appsToShow = MANAGEMENT_APP_IDS.filter((app) => {
     if (!visibleApps) return true;
     return visibleApps[app];
   });
@@ -158,7 +157,11 @@ export function AppSwitcher({
 
   const visibleList = appsToShow.slice(0, Math.max(1, visibleCount));
   // 激活应用被收进溢出区时，顶替最后一个可见位，保证始终可点亮
-  if (appsToShow.includes(activeApp) && !visibleList.includes(activeApp)) {
+  if (
+    isManagementApp(activeApp) &&
+    appsToShow.includes(activeApp) &&
+    !visibleList.includes(activeApp)
+  ) {
     visibleList[visibleList.length - 1] = activeApp;
   }
   const overflowList = appsToShow.filter((app) => !visibleList.includes(app));

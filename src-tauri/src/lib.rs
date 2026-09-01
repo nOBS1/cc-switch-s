@@ -241,6 +241,26 @@ fn runtime_log_level_allows(level: log::Level, max_level: log::LevelFilter) -> b
     max_level.to_level().is_some_and(|maximum| level <= maximum)
 }
 
+fn guard_private_log_target(log_dir: &std::path::Path) -> Result<(), String> {
+    let log_path = log_dir.join("cc-switch.log");
+    crate::app_store::ensure_private_app_data_path_isolated(log_dir)
+        .map_err(|error| format!("拒绝不安全的日志目录 {}: {error}", log_dir.display()))?;
+    crate::app_store::ensure_private_app_data_path_isolated(&log_path)
+        .map_err(|error| format!("拒绝不安全的日志文件 {}: {error}", log_path.display()))
+}
+
+/// Prepare the exact folder/file pair consumed by `tauri-plugin-log`.
+///
+/// Both checks are repeated after directory creation so an existing
+/// symlink/junction (or a concurrently replaced component) cannot turn a
+/// private-build log target into an upstream CC Switch target.
+fn prepare_private_log_target(log_dir: &std::path::Path) -> Result<(), String> {
+    guard_private_log_target(log_dir)?;
+    std::fs::create_dir_all(log_dir)
+        .map_err(|error| format!("创建日志目录 {} 失败: {error}", log_dir.display()))?;
+    guard_private_log_target(log_dir)
+}
+
 /// 统一处理 ccswitch:// 深链接 URL
 ///
 /// - 解析 URL
@@ -463,10 +483,17 @@ pub fn run() {
                 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
                 let log_dir = panic_hook::get_log_dir();
-
-                // 确保日志目录存在
-                if let Err(e) = std::fs::create_dir_all(&log_dir) {
-                    eprintln!("创建日志目录失败: {e}");
+                let mut log_targets = vec![Target::new(TargetKind::Stdout)];
+                match prepare_private_log_target(&log_dir) {
+                    Ok(()) => log_targets.push(Target::new(TargetKind::Folder {
+                        path: log_dir,
+                        file_name: Some("cc-switch".into()),
+                    })),
+                    Err(error) => {
+                        // The logger itself is not available yet. Keep stdout
+                        // diagnostics, but never register an unsafe file sink.
+                        eprintln!("文件日志已禁用: {error}");
+                    }
                 }
 
                 app.handle().plugin(
@@ -479,13 +506,7 @@ pub fn run() {
                         .filter(|metadata| {
                             runtime_log_level_allows(metadata.level(), log::max_level())
                         })
-                        .targets([
-                            Target::new(TargetKind::Stdout),
-                            Target::new(TargetKind::Folder {
-                                path: log_dir,
-                                file_name: Some("cc-switch".into()),
-                            }),
-                        ])
+                        .targets(log_targets)
                         // KeepSome(4) 保留 4 个轮转归档，加上当前文件最多约 100 MiB。
                         // 轮转仅按大小触发；跨重启继续追加，不再丢失上一次运行的日志。
                         .rotation_strategy(RotationStrategy::KeepSome(4))
@@ -527,6 +548,7 @@ pub fn run() {
             let app_config_dir = crate::config::get_app_config_dir();
             let db_path = app_config_dir.join("cc-switch.db");
             let json_path = app_config_dir.join("config.json");
+            crate::app_store::ensure_private_app_data_path_isolated(&json_path)?;
 
             // 检查是否需要从 config.json 迁移到 SQLite
             let has_json = json_path.exists();
@@ -640,6 +662,8 @@ pub fn run() {
                         crate::init_status::set_migration_success();
                         // 归档旧配置文件（重命名而非删除，便于用户恢复）
                         let archive_path = json_path.with_extension("json.migrated");
+                        crate::app_store::ensure_private_app_data_path_isolated(&json_path)?;
+                        crate::app_store::ensure_private_app_data_path_isolated(&archive_path)?;
                         if let Err(e) = std::fs::rename(&json_path, &archive_path) {
                             log::warn!("归档旧配置文件失败: {e}");
                         } else {
@@ -1047,7 +1071,10 @@ pub fn run() {
                     crate::app_config::AppType::OpenClaw,
                     crate::app_config::AppType::Hermes,
                     crate::app_config::AppType::Pi,
-                ] {
+                ]
+                .into_iter()
+                .filter(crate::fork_policy::app_management_allowed)
+                {
                     match crate::services::prompt::PromptService::import_from_file_on_first_launch(
                         &app_state,
                         app.clone(),
@@ -2011,6 +2038,12 @@ const PROXY_STARTUP_APP_TYPES: [&str; 4] = ["claude", "codex", "gemini", "grokbu
 async fn enabled_proxy_apps_on_startup(db: &database::Database) -> Vec<&'static str> {
     let mut apps = Vec::new();
     for app_type in PROXY_STARTUP_APP_TYPES {
+        let Ok(app) = app_type.parse::<crate::app_config::AppType>() else {
+            continue;
+        };
+        if !crate::fork_policy::app_management_allowed(&app) {
+            continue;
+        }
         if db
             .get_proxy_config_for_app(app_type)
             .await
@@ -2121,7 +2154,10 @@ fn initialize_common_config_snippets(state: &store::AppState) {
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
-        ] {
+        ]
+        .into_iter()
+        .filter(crate::fork_policy::app_management_allowed)
+        {
             if let Err(e) = crate::services::provider::ProviderService::migrate_legacy_common_config_usage_if_needed(
                 state,
                 app_type.clone(),
@@ -2345,11 +2381,48 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_exit_request, enabled_proxy_apps_on_startup, redact_url_for_log,
-        redact_url_for_log_with_secrets, redact_url_origin_for_log, runtime_log_level_allows,
-        ExitRequestAction,
+        classify_exit_request, enabled_proxy_apps_on_startup, prepare_private_log_target,
+        redact_url_for_log, redact_url_for_log_with_secrets, redact_url_origin_for_log,
+        runtime_log_level_allows, ExitRequestAction,
     };
     use crate::database::Database;
+
+    struct TestHomeGuard(Option<std::ffi::OsString>);
+
+    impl TestHomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn alias_directory(source: &std::path::Path, destination: &std::path::Path) -> bool {
+        std::os::unix::fs::symlink(source, destination).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn alias_directory(source: &std::path::Path, destination: &std::path::Path) -> bool {
+        if std::os::windows::fs::symlink_dir(source, destination).is_ok() {
+            return true;
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(destination)
+            .arg(source)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 
     #[test]
     fn log_url_redaction_strips_credentials_and_query_keeps_path() {
@@ -2433,6 +2506,56 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn startup_file_logger_rejects_private_root_alias_to_upstream_data() {
+        let home = tempfile::tempdir().expect("temp home");
+        let _home_guard = TestHomeGuard::set(home.path());
+        let upstream_root = home.path().join(".cc-switch");
+        let private_alias = home.path().join(".cc-switch-cometix");
+        std::fs::create_dir_all(&upstream_root).expect("create upstream root");
+        assert!(alias_directory(&upstream_root, &private_alias));
+
+        let result = prepare_private_log_target(&private_alias.join("logs"));
+        let upstream_logs_created = upstream_root.join("logs").exists();
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&private_alias).expect("remove test junction");
+
+        assert!(
+            result.is_err(),
+            "unsafe file logger target must be rejected"
+        );
+        assert!(
+            !upstream_logs_created,
+            "logger preparation must not create an upstream logs directory"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn startup_file_logger_rejects_active_log_hardlink_to_upstream_database() {
+        let home = tempfile::tempdir().expect("temp home");
+        let _home_guard = TestHomeGuard::set(home.path());
+        let upstream_root = home.path().join(".cc-switch");
+        let log_dir = home.path().join(".cc-switch-cometix/logs");
+        std::fs::create_dir_all(&upstream_root).expect("create upstream root");
+        std::fs::create_dir_all(&log_dir).expect("create private logs root");
+        let upstream_db = upstream_root.join("cc-switch.db");
+        let active_log = log_dir.join("cc-switch.log");
+        std::fs::write(&upstream_db, b"official database sentinel")
+            .expect("write upstream database");
+        std::fs::hard_link(&upstream_db, &active_log).expect("create active-log hardlink");
+
+        let result = prepare_private_log_target(&log_dir);
+
+        assert!(result.is_err(), "unsafe active log target must be rejected");
+        assert_eq!(
+            std::fs::read(&upstream_db).expect("read upstream database"),
+            b"official database sentinel"
+        );
+    }
+
+    #[test]
     fn no_code_keeps_app_alive_in_tray() {
         assert_eq!(classify_exit_request(None), ExitRequestAction::StayInTray);
     }
@@ -2472,5 +2595,32 @@ mod tests {
         let apps = enabled_proxy_apps_on_startup(&db).await;
 
         assert_eq!(apps, vec!["grokbuild"]);
+    }
+
+    #[tokio::test]
+    async fn startup_restore_excludes_official_claude_in_private_fork() {
+        let db = Database::memory().expect("initialize database");
+
+        let mut claude = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read Claude proxy config");
+        claude.enabled = true;
+        db.update_proxy_config_for_app(claude)
+            .await
+            .expect("enable Claude proxy config");
+
+        let mut codex = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read Codex proxy config");
+        codex.enabled = true;
+        db.update_proxy_config_for_app(codex)
+            .await
+            .expect("enable Codex proxy config");
+
+        let apps = enabled_proxy_apps_on_startup(&db).await;
+
+        assert_eq!(apps, vec!["codex"]);
     }
 }

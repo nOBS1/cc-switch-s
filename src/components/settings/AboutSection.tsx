@@ -60,7 +60,6 @@ interface ToolVersion {
 }
 
 const TOOL_NAMES = [
-  "claude",
   "claude-cometix",
   "codex",
   "gemini",
@@ -128,9 +127,7 @@ const HERMES_WINDOWS_INSTALL_COMMAND = `powershell -NoProfile -ExecutionPolicy B
   HERMES_WINDOWS_INSTALL_SCRIPT,
 )}`;
 
-const POSIX_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
-${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthropic-ai/claude-code@latest
-# Claude Code (Cometix)
+const POSIX_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code (Cometix)
 npm install --prefix "$HOME/.local/share/hlclaude" @cometix/claude-code@latest
 mkdir -p "$HOME/.local/bin"
 if [ ! -e "$HOME/.local/bin/hlclaude" ]; then
@@ -152,9 +149,7 @@ ${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/herm
 # Pi
 npm i -g @earendil-works/pi-coding-agent@latest`;
 
-const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
-npm i -g @anthropic-ai/claude-code@latest
-# Claude Code (Cometix)
+const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code (Cometix)
 npm install --prefix "$env:USERPROFILE\\.local\\share\\hlclaude" @cometix/claude-code@latest
 $hlclaudeBin = Join-Path $env:USERPROFILE ".local\\bin"
 New-Item -ItemType Directory -Force $hlclaudeBin | Out-Null
@@ -190,7 +185,6 @@ const ONE_CLICK_INSTALL_COMMANDS = isWindows()
   : POSIX_ONE_CLICK_INSTALL_COMMANDS;
 
 const TOOL_DISPLAY_NAMES: Record<OriginalToolName, string> = {
-  claude: "Claude Code",
   codex: "Codex",
   gemini: "Gemini CLI",
   grok: "Grok Build",
@@ -201,7 +195,6 @@ const TOOL_DISPLAY_NAMES: Record<OriginalToolName, string> = {
 };
 
 const TOOL_APP_IDS: Record<ToolName, AppId> = {
-  claude: "claude",
   "claude-cometix": "claude-cometix",
   codex: "codex",
   gemini: "gemini",

@@ -645,6 +645,7 @@ impl MultiAppConfig {
     /// 从文件加载配置（仅支持 v2 结构）
     pub fn load() -> Result<Self, AppError> {
         let config_path = get_app_config_path();
+        crate::app_store::ensure_private_app_data_path_isolated(&config_path)?;
 
         if !config_path.exists() {
             log::info!("配置文件不存在，创建新的多应用配置并自动导入提示词");
@@ -689,6 +690,7 @@ impl MultiAppConfig {
 
         if !has_skills_in_config {
             let skills_path = get_app_config_dir().join("skills.json");
+            crate::app_store::ensure_private_app_data_path_isolated(&skills_path)?;
             if skills_path.exists() {
                 match std::fs::read_to_string(&skills_path) {
                     Ok(content) => match serde_json::from_str::<SkillStore>(&content) {
@@ -760,9 +762,11 @@ impl MultiAppConfig {
     /// 保存配置到文件
     pub fn save(&self) -> Result<(), AppError> {
         let config_path = get_app_config_path();
+        crate::app_store::ensure_private_app_data_path_isolated(&config_path)?;
         // 先备份旧版（若存在）到 ~/.cc-switch-cometix/config.json.bak，再写入新内容
         if config_path.exists() {
             let backup_path = get_app_config_dir().join("config.json.bak");
+            crate::app_store::ensure_private_app_data_path_isolated(&backup_path)?;
             if let Err(e) = copy_file(&config_path, &backup_path) {
                 log::warn!("备份 config.json 到 .bak 失败: {e}");
             }

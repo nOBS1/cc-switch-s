@@ -8,6 +8,7 @@ import { UniversalProviderFormModal } from "./UniversalProviderFormModal";
 import { universalProvidersApi } from "@/lib/api";
 import type { UniversalProvider, UniversalProvidersMap } from "@/types";
 import { deepClone } from "@/utils/deepClone";
+import { sanitizePrivateForkUniversalProvider } from "@/config/universalProviderPresets";
 
 export function UniversalProviderPanel() {
   const { t } = useTranslation();
@@ -55,11 +56,12 @@ export function UniversalProviderPanel() {
   const handleSave = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await universalProvidersApi.upsert(provider);
+        const managedProvider = sanitizePrivateForkUniversalProvider(provider);
+        await universalProvidersApi.upsert(managedProvider);
 
         // 新建模式下自动同步到各应用
         if (!editingProvider) {
-          await universalProvidersApi.sync(provider.id);
+          await universalProvidersApi.sync(managedProvider.id);
         }
 
         toast.success(
@@ -89,8 +91,9 @@ export function UniversalProviderPanel() {
   const handleSaveAndSync = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await universalProvidersApi.upsert(provider);
-        await universalProvidersApi.sync(provider.id);
+        const managedProvider = sanitizePrivateForkUniversalProvider(provider);
+        await universalProvidersApi.upsert(managedProvider);
+        await universalProvidersApi.sync(managedProvider.id);
         toast.success(
           t("universalProvider.savedAndSynced", {
             defaultValue: "已保存并同步到所有应用",
@@ -137,6 +140,12 @@ export function UniversalProviderPanel() {
     if (!syncConfirm.id) return;
 
     try {
+      const provider = providers[syncConfirm.id];
+      if (provider) {
+        await universalProvidersApi.upsert(
+          sanitizePrivateForkUniversalProvider(provider),
+        );
+      }
       await universalProvidersApi.sync(syncConfirm.id);
       toast.success(
         t("universalProvider.synced", { defaultValue: "已同步到所有应用" }),
@@ -151,7 +160,7 @@ export function UniversalProviderPanel() {
     } finally {
       setSyncConfirm({ open: false, id: "", name: "" });
     }
-  }, [syncConfirm.id, t]);
+  }, [providers, syncConfirm.id, t]);
 
   // 打开同步确认
   const handleSyncClick = useCallback(
@@ -176,8 +185,10 @@ export function UniversalProviderPanel() {
         createdAt: Date.now(),
       };
       try {
-        await universalProvidersApi.upsert(duplicated);
-        await universalProvidersApi.sync(duplicated.id);
+        const managedProvider =
+          sanitizePrivateForkUniversalProvider(duplicated);
+        await universalProvidersApi.upsert(managedProvider);
+        await universalProvidersApi.sync(managedProvider.id);
         toast.success(
           t("universalProvider.duplicatedAndSynced", {
             defaultValue: "统一供应商已复制并同步",
@@ -234,7 +245,7 @@ export function UniversalProviderPanel() {
       <p className="text-sm text-muted-foreground">
         {t("universalProvider.description", {
           defaultValue:
-            "统一供应商可以同时管理 Claude、Codex 和 Gemini 的配置。修改后会自动同步到所有启用的应用。",
+            "统一供应商可以同时管理 Codex 和 Gemini 的配置。修改后会自动同步到所有启用的应用。",
         })}
       </p>
 
@@ -306,7 +317,7 @@ export function UniversalProviderPanel() {
           defaultValue: "同步统一供应商",
         })}
         message={t("universalProvider.syncConfirmDescription", {
-          defaultValue: `同步 "${syncConfirm.name}" 将会覆盖 Claude、Codex 和 Gemini 中关联的供应商配置。确定要继续吗？`,
+          defaultValue: `同步 "${syncConfirm.name}" 将会覆盖 Codex 和 Gemini 中关联的供应商配置。确定要继续吗？`,
           name: syncConfirm.name,
         })}
         confirmText={t("universalProvider.syncConfirm", {

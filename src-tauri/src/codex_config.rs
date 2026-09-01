@@ -226,7 +226,7 @@ impl CodexLiveStateSnapshot {
             config: CodexLiveFileState::capture(get_codex_config_path())?,
             catalog: CodexLiveFileState::capture(get_codex_model_catalog_path())?,
             managed_marker: CodexLiveFileState::capture(
-                get_codex_managed_oauth_live_auth_marker_path(),
+                get_isolated_codex_managed_oauth_live_auth_marker_path()?,
             )?,
         })
     }
@@ -250,14 +250,15 @@ impl CodexLiveStateSnapshot {
                 None
             }
         };
-        let current_marker =
-            match CodexLiveFileState::capture(get_codex_managed_oauth_live_auth_marker_path()) {
-                Ok(state) => Some(state),
-                Err(error) => {
-                    failures.push(format!("inspect current managed marker: {error}"));
-                    None
-                }
-            };
+        let current_marker = match get_isolated_codex_managed_oauth_live_auth_marker_path()
+            .and_then(CodexLiveFileState::capture)
+        {
+            Ok(state) => Some(state),
+            Err(error) => {
+                failures.push(format!("inspect current managed marker: {error}"));
+                None
+            }
+        };
         let snapshot_generation = Self::chatgpt_auth_generation(&self.auth, &self.managed_marker);
         let current_generation = current_auth
             .as_ref()
@@ -282,13 +283,16 @@ impl CodexLiveStateSnapshot {
             }
         }
         if !preserve_current_auth {
-            for (label, state) in [
-                ("auth", &self.auth),
-                ("managed marker", &self.managed_marker),
-            ] {
-                if let Err(error) = state.restore() {
-                    failures.push(format!("{label}: {error}"));
+            if let Err(error) = self.auth.restore() {
+                failures.push(format!("auth: {error}"));
+            }
+            match get_isolated_codex_managed_oauth_live_auth_marker_path() {
+                Ok(_) => {
+                    if let Err(error) = self.managed_marker.restore() {
+                        failures.push(format!("managed marker: {error}"));
+                    }
                 }
+                Err(error) => failures.push(format!("managed marker: {error}")),
             }
         }
 
@@ -423,6 +427,12 @@ pub fn get_codex_auth_path() -> PathBuf {
 
 fn get_codex_managed_oauth_live_auth_marker_path() -> PathBuf {
     crate::config::get_app_config_dir().join(CODEX_MANAGED_OAUTH_LIVE_AUTH_MARKER_FILENAME)
+}
+
+fn get_isolated_codex_managed_oauth_live_auth_marker_path() -> Result<PathBuf, AppError> {
+    let path = get_codex_managed_oauth_live_auth_marker_path();
+    crate::app_store::ensure_private_app_data_path_isolated(&path)?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -588,7 +598,10 @@ pub fn record_codex_managed_oauth_live_auth(
         chatgpt_account_id: Some(chatgpt_account_id),
         user_identity: Some(user_identity),
     };
-    crate::config::write_json_file(&get_codex_managed_oauth_live_auth_marker_path(), &marker)
+    crate::config::write_json_file(
+        &get_isolated_codex_managed_oauth_live_auth_marker_path()?,
+        &marker,
+    )
 }
 
 fn migrate_legacy_codex_managed_oauth_live_auth_marker(
@@ -596,7 +609,7 @@ fn migrate_legacy_codex_managed_oauth_live_auth_marker(
     managed_account_id: &str,
     managed_id_token: Option<&str>,
 ) -> Result<(), AppError> {
-    let marker_path = get_codex_managed_oauth_live_auth_marker_path();
+    let marker_path = get_isolated_codex_managed_oauth_live_auth_marker_path()?;
     if !marker_path.exists() {
         return Ok(());
     }
@@ -648,7 +661,7 @@ pub fn codex_auth_matches_recorded_managed_oauth(
         return Ok(false);
     };
     let auth_user_identity = extract_codex_auth_user_identity(auth);
-    let marker_path = get_codex_managed_oauth_live_auth_marker_path();
+    let marker_path = get_isolated_codex_managed_oauth_live_auth_marker_path()?;
     let marker: CodexManagedOAuthLiveAuthMarker = match read_json_file(&marker_path) {
         Ok(marker) => marker,
         Err(err) => {
@@ -703,7 +716,7 @@ pub(crate) fn codex_live_auth_matches_managed_request(
 fn clear_codex_managed_oauth_live_auth_marker_for_account(
     account_id: &str,
 ) -> Result<(), AppError> {
-    let marker_path = get_codex_managed_oauth_live_auth_marker_path();
+    let marker_path = get_isolated_codex_managed_oauth_live_auth_marker_path()?;
     if !marker_path.exists() {
         return Ok(());
     }
@@ -793,7 +806,7 @@ pub fn clear_codex_live_auth_for_managed_account_if_unchanged(
     if removed_matching_auth {
         // Once the matching live file is gone, any marker is stale regardless
         // of version or parseability.
-        delete_file(&get_codex_managed_oauth_live_auth_marker_path())?;
+        delete_file(&get_isolated_codex_managed_oauth_live_auth_marker_path()?)?;
     } else {
         clear_codex_managed_oauth_live_auth_marker_for_account(account_id)?;
     }
@@ -922,7 +935,7 @@ pub fn sync_codex_managed_oauth_live_auth_after_refresh(
         return Ok(false);
     }
 
-    let marker_path = get_codex_managed_oauth_live_auth_marker_path();
+    let marker_path = get_isolated_codex_managed_oauth_live_auth_marker_path()?;
     let was_recorded_managed = marker_path.exists()
         && codex_auth_matches_recorded_managed_oauth(&current_auth, account_id)?;
 

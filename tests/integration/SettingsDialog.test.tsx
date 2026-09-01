@@ -240,19 +240,28 @@ describe("SettingsPage integration", () => {
       expect(appInput.value).toBe("/home/mock/.cc-switch-cometix"),
     );
 
-    const claudeInput = (await screen.findByPlaceholderText(
-      "settings.browsePlaceholderClaude",
+    expect(
+      screen.queryByPlaceholderText("settings.browsePlaceholderClaude"),
+    ).not.toBeInTheDocument();
+    const claudeCometixInput = (await screen.findByPlaceholderText(
+      /\.hlclaude$/,
     )) as HTMLInputElement;
-    fireEvent.change(claudeInput, { target: { value: "/custom/claude" } });
-    await waitFor(() => expect(claudeInput.value).toBe("/custom/claude"));
+    fireEvent.change(claudeCometixInput, {
+      target: { value: "/custom/hlclaude" },
+    });
+    await waitFor(() =>
+      expect(claudeCometixInput.value).toBe("/custom/hlclaude"),
+    );
 
     fireEvent.click(browseButtons[1]);
     await waitFor(() =>
-      expect(claudeInput.value).toBe("/custom/claude/picked"),
+      expect(claudeCometixInput.value).toBe("/custom/hlclaude/picked"),
     );
 
     fireEvent.click(resetButtons[1]);
-    await waitFor(() => expect(claudeInput.value).toBe("/home/mock/.claude"));
+    await waitFor(() =>
+      expect(claudeCometixInput.value).toBe("/home/mock/.hlclaude"),
+    );
   });
 
   it("notifies when export fails", async () => {

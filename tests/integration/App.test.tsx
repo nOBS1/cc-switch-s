@@ -210,6 +210,23 @@ describe("App integration with MSW", () => {
     localStorage.removeItem("cc-switch-last-app");
   });
 
+  it("redirects a legacy official Claude selection to the isolated Cometix entry", async () => {
+    localStorage.setItem("cc-switch-last-app", "claude");
+    const getAllSpy = vi.spyOn(providersApi, "getAll");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-switcher")).toHaveTextContent(
+        "claude-cometix",
+      );
+      expect(getAllSpy).toHaveBeenCalledWith("claude-cometix");
+    });
+
+    getAllSpy.mockRestore();
+  }, 10_000);
+
   it("routes the Cometix UI entry through its independent provider domain", async () => {
     localStorage.setItem("cc-switch-last-app", "codex");
     const getAllSpy = vi.spyOn(providersApi, "getAll");
@@ -251,16 +268,10 @@ describe("App integration with MSW", () => {
   });
 
   it("covers basic provider flows via real hooks", async () => {
+    localStorage.setItem("cc-switch-last-app", "codex");
     const { default: App } = await import("@/App");
     renderApp(App);
 
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
-      ),
-    );
-
-    fireEvent.click(screen.getByText("switch-codex"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
         "codex-1",
@@ -308,12 +319,13 @@ describe("App integration with MSW", () => {
   }, 10_000);
 
   it("shows toast when auto sync fails in background", async () => {
+    localStorage.setItem("cc-switch-last-app", "codex");
     const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
+        "codex-1",
       ),
     );
 

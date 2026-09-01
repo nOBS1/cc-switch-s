@@ -456,7 +456,7 @@ describe("useProviderActions", () => {
     expect(toastErrorMock).not.toHaveBeenCalled();
   });
 
-  it("should sync plugin config when switching Claude provider with integration enabled", async () => {
+  it("does not sync the official Claude plugin when legacy integration is enabled", async () => {
     switchProviderMutateAsync.mockResolvedValueOnce(undefined);
     settingsApiGetMock.mockResolvedValueOnce({
       enableClaudePluginIntegration: true,
@@ -474,8 +474,8 @@ describe("useProviderActions", () => {
     });
 
     expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
-    expect(settingsApiGetMock).toHaveBeenCalledTimes(1);
-    expect(settingsApiApplyMock).toHaveBeenCalledWith({ official: true });
+    expect(settingsApiGetMock).not.toHaveBeenCalled();
+    expect(settingsApiApplyMock).not.toHaveBeenCalled();
   });
 
   it("should not call applyClaudePluginConfig when integration is disabled", async () => {
@@ -494,11 +494,11 @@ describe("useProviderActions", () => {
       await result.current.switchProvider(provider);
     });
 
-    expect(settingsApiGetMock).toHaveBeenCalledTimes(1);
+    expect(settingsApiGetMock).not.toHaveBeenCalled();
     expect(settingsApiApplyMock).not.toHaveBeenCalled();
   });
 
-  it("should show error toast when plugin sync fails with error message", async () => {
+  it("does not call the official plugin API even if its mock would fail", async () => {
     switchProviderMutateAsync.mockResolvedValueOnce(undefined);
     settingsApiGetMock.mockResolvedValueOnce({
       enableClaudePluginIntegration: true,
@@ -515,8 +515,9 @@ describe("useProviderActions", () => {
       await result.current.switchProvider(provider);
     });
 
-    expect(toastErrorMock).toHaveBeenCalledTimes(1);
-    expect(toastErrorMock.mock.calls[0]?.[0]).toBe("Sync failed");
+    expect(settingsApiGetMock).not.toHaveBeenCalled();
+    expect(settingsApiApplyMock).not.toHaveBeenCalled();
+    expect(toastErrorMock).not.toHaveBeenCalled();
   });
 
   it("propagates updateProvider errors", async () => {
@@ -535,7 +536,7 @@ describe("useProviderActions", () => {
     ).rejects.toThrow("update failed");
   });
 
-  it("should use default error message when plugin sync fails without error message", async () => {
+  it("does not surface plugin errors because the private fork never calls that API", async () => {
     switchProviderMutateAsync.mockResolvedValueOnce(undefined);
     settingsApiGetMock.mockResolvedValueOnce({
       enableClaudePluginIntegration: true,
@@ -552,8 +553,9 @@ describe("useProviderActions", () => {
       await result.current.switchProvider(provider);
     });
 
-    expect(toastErrorMock).toHaveBeenCalledTimes(1);
-    expect(toastErrorMock.mock.calls[0]?.[0]).toBe("同步 Claude 插件失败");
+    expect(settingsApiGetMock).not.toHaveBeenCalled();
+    expect(settingsApiApplyMock).not.toHaveBeenCalled();
+    expect(toastErrorMock).not.toHaveBeenCalled();
   });
 
   it("handles mutation errors when plugin sync is skipped", async () => {

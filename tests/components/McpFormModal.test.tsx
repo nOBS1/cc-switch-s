@@ -192,12 +192,12 @@ describe("McpFormModal", () => {
     );
   });
 
-  it("可只为 Cometix 启用 MCP，且不启用官方 Claude", async () => {
+  it("只展示 Cometix MCP 目标且不会提交官方 Claude", async () => {
     renderForm({ defaultEnabledApps: ["claude-cometix"] });
 
     expect(
-      screen.getByLabelText("mcp.unifiedPanel.apps.claude"),
-    ).not.toBeChecked();
+      screen.queryByLabelText("mcp.unifiedPanel.apps.claude"),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByLabelText("mcp.unifiedPanel.apps.claudeCometix"),
     ).toBeChecked();
@@ -267,10 +267,14 @@ describe("McpFormModal", () => {
         command: "run",
       },
       apps: {
-        claude: true,
+        claude: false,
+        "claude-cometix": true,
         codex: true,
         gemini: true,
         grokbuild: true,
+        opencode: false,
+        openclaw: false,
+        hermes: false,
       },
     });
     expect(onSave).toHaveBeenCalledTimes(1);
@@ -413,11 +417,14 @@ type = "stdio"
     expect(entry.server.command).toBe("updated");
     expect(entry.enabled).toBe(true);
     expect(entry.apps).toEqual({
-      claude: true,
+      claude: false,
       "claude-cometix": false,
       codex: false,
       gemini: false,
       grokbuild: false,
+      opencode: false,
+      openclaw: false,
+      hermes: false,
     });
     expect(onSave).toHaveBeenCalledTimes(1);
     expect(onSave).toHaveBeenCalledWith();
@@ -433,11 +440,11 @@ type = "stdio"
       target: { value: '{"type":"stdio","command":"run"}' },
     });
 
-    const claudeCheckbox = screen.getByLabelText(
-      "mcp.unifiedPanel.apps.claude",
+    const claudeCometixCheckbox = screen.getByLabelText(
+      "mcp.unifiedPanel.apps.claudeCometix",
     ) as HTMLInputElement;
-    expect(claudeCheckbox.checked).toBe(true);
-    fireEvent.click(claudeCheckbox);
+    expect(claudeCometixCheckbox.checked).toBe(true);
+    fireEvent.click(claudeCometixCheckbox);
 
     const codexCheckbox = screen.getByLabelText(
       "mcp.unifiedPanel.apps.codex",

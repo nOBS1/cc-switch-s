@@ -87,15 +87,17 @@ impl McpService {
     }
 
     /// 添加或更新 MCP 服务器
-    pub fn upsert_server(state: &AppState, server: McpServer) -> Result<(), AppError> {
+    pub fn upsert_server(state: &AppState, mut server: McpServer) -> Result<(), AppError> {
         Self::migrate_legacy_cometix_rows(state)?;
+
+        let requested_official = server.apps.claude;
+        server.apps.claude = false;
 
         let parsed_scope = ClaudeMcpScope::from_storage_id(&server.id);
         let live_id = parsed_scope
             .as_ref()
             .map(|(_, live_id)| live_id.clone())
             .unwrap_or_else(|| server.id.clone());
-        let wants_official = server.apps.claude;
         let wants_cometix = server.apps.claude_cometix;
 
         if parsed_scope.as_ref().map(|(scope, _)| *scope) == Some(ClaudeMcpScope::Cometix) {
@@ -105,20 +107,6 @@ impl McpService {
             cometix.apps.claude_cometix = wants_cometix;
             Self::upsert_single(state, cometix)?;
 
-            if wants_official {
-                let existing = state.db.get_all_mcp_servers()?;
-                let mut official = if let Some(existing) = existing.get(&live_id) {
-                    existing.clone()
-                } else {
-                    let mut official = server;
-                    official.id = live_id;
-                    official.apps = McpApps::default();
-                    official
-                };
-                official.apps.claude = true;
-                official.apps.claude_cometix = false;
-                Self::upsert_single(state, official)?;
-            }
             return Ok(());
         }
 
@@ -128,7 +116,7 @@ impl McpService {
             shared.apps.claude_cometix = false;
             if !shared.apps.is_empty() {
                 Self::upsert_single(state, shared)?;
-            } else {
+            } else if !requested_official {
                 // The caller edited the raw/unified row and moved its last
                 // assignment to Cometix. Leaving the previous raw row behind
                 // would keep official Claude enabled and its live entry stale.
@@ -152,10 +140,11 @@ impl McpService {
         }
 
         if parsed_scope.as_ref().map(|(scope, _)| *scope) == Some(ClaudeMcpScope::Official) {
-            let mut official = server;
-            official.id = live_id;
-            official.apps.claude_cometix = false;
-            return Self::upsert_single(state, official);
+            return Ok(());
+        }
+
+        if requested_official && server.apps.is_empty() {
+            return Ok(());
         }
 
         Self::upsert_single(state, server)
@@ -223,9 +212,34 @@ impl McpService {
 
     /// 删除 MCP 服务器
     pub fn delete_server(state: &AppState, id: &str) -> Result<bool, AppError> {
+        Self::migrate_legacy_cometix_rows(state)?;
         let server = state.db.get_all_mcp_servers()?.shift_remove(id);
 
         if let Some(server) = server {
+            let is_official_scope = ClaudeMcpScope::from_storage_id(id)
+                .is_some_and(|(scope, _)| scope == ClaudeMcpScope::Official);
+            if server.apps.claude || is_official_scope {
+                let affected_apps = server
+                    .apps
+                    .enabled_apps()
+                    .into_iter()
+                    .filter(crate::fork_policy::app_management_allowed)
+                    .collect::<Vec<_>>();
+                if affected_apps.is_empty() {
+                    return Ok(false);
+                }
+
+                let mut preserved = server.clone();
+                preserved.apps = McpApps::default();
+                preserved.apps.claude = true;
+                state.db.save_mcp_server(&preserved)?;
+                let live_id = live_mcp_id(id);
+                for app in affected_apps {
+                    Self::reconcile_live_id_for_app(state, &live_id, &app)?;
+                }
+                return Ok(true);
+            }
+
             state.db.delete_mcp_server(id)?;
 
             // Reconcile every affected live target after deleting this storage
@@ -244,6 +258,9 @@ impl McpService {
         app: AppType,
         enabled: bool,
     ) -> Result<(), AppError> {
+        if !crate::fork_policy::app_management_allowed(&app) {
+            return Ok(());
+        }
         Self::migrate_legacy_cometix_rows(state)?;
 
         if let Some(scope) = ClaudeMcpScope::for_app(&app) {
@@ -303,6 +320,9 @@ impl McpService {
     }
 
     fn sync_server_to_app_no_config(server: &McpServer, app: &AppType) -> Result<(), AppError> {
+        if !crate::fork_policy::app_management_allowed(app) {
+            return Ok(());
+        }
         if !belongs_to_app(&server.id, app) {
             return Ok(());
         }
@@ -416,6 +436,9 @@ impl McpService {
     }
 
     fn remove_live_id_from_app(live_id: &str, app: &AppType) -> Result<(), AppError> {
+        if !crate::fork_policy::app_management_allowed(app) {
+            return Ok(());
+        }
         match app {
             AppType::Claude => mcp::remove_server_from_claude(live_id)?,
             AppType::ClaudeCometix => mcp::remove_server_from_claude_cometix(live_id)?,
@@ -815,8 +838,7 @@ impl McpService {
         let mut total = 0;
         let mut failures: Vec<String> = Vec::new();
 
-        let results: [(&str, Result<usize, AppError>); 7] = [
-            ("claude", Self::import_from_claude(state)),
+        let results: [(&str, Result<usize, AppError>); 6] = [
             ("claude-cometix", Self::import_from_claude_cometix(state)),
             ("codex", Self::import_from_codex(state)),
             ("gemini", Self::import_from_gemini(state)),

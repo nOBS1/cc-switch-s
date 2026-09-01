@@ -276,11 +276,16 @@ pub async fn get_claude_common_config_snippet(
         .map_err(|e| e.to_string())
 }
 
+fn ensure_legacy_claude_common_config_management_allowed() -> Result<(), String> {
+    ensure_app_management_allowed(&AppType::Claude).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn set_claude_common_config_snippet(
     snippet: String,
     state: tauri::State<'_, crate::store::AppState>,
 ) -> Result<(), String> {
+    ensure_legacy_claude_common_config_management_allowed()?;
     let is_cleared = snippet.trim().is_empty();
 
     if !snippet.trim().is_empty() {
@@ -411,7 +416,14 @@ pub async fn set_common_config_snippet(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_common_config_snippet;
+    use super::{
+        ensure_legacy_claude_common_config_management_allowed, validate_common_config_snippet,
+    };
+
+    #[test]
+    fn legacy_claude_common_config_write_is_disabled_in_private_fork() {
+        assert!(ensure_legacy_claude_common_config_management_allowed().is_err());
+    }
 
     #[test]
     fn validate_common_config_snippet_accepts_comment_only_codex_snippet() {

@@ -2,7 +2,8 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 use cc_switch_lib::{
-    get_codex_auth_path, get_codex_config_path, import_default_config_test_hook, read_json_file,
+    get_claude_cometix_settings_path, get_claude_settings_path, get_codex_auth_path,
+    get_codex_config_path, import_default_config_test_hook, read_json_file,
     switch_provider_test_hook, write_codex_live_atomic, AppError, AppType, McpApps, McpServer,
     MultiAppConfig, Provider, ProviderService,
 };
@@ -36,40 +37,45 @@ context_window = 500000
 }
 
 #[test]
-fn private_fork_command_boundary_rejects_claude_desktop_import_and_switch() {
+fn private_fork_command_boundary_rejects_official_claude_import_and_switch() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
     let state = create_test_state().expect("create test state");
 
-    let import_error = import_default_config_test_hook(&state, AppType::ClaudeDesktop)
-        .expect_err("Claude Desktop startup/manual import must be disabled");
-    assert!(import_error.to_string().contains("Claude Desktop"));
+    for (app, provider_id) in [
+        (AppType::Claude, "legacy-claude"),
+        (AppType::ClaudeDesktop, "legacy-desktop"),
+    ] {
+        let import_error = import_default_config_test_hook(&state, app.clone())
+            .expect_err("official Claude startup/manual import must be disabled");
+        assert!(import_error.to_string().contains("official CC Switch"));
 
-    state
-        .db
-        .save_provider(
-            AppType::ClaudeDesktop.as_str(),
-            &Provider::with_id(
-                "legacy-desktop".to_string(),
-                "Legacy Desktop row".to_string(),
-                json!({"env": {"ANTHROPIC_API_KEY": "must-not-be-written"}}),
-                None,
-            ),
-        )
-        .expect("seed a cloned legacy DB row");
-
-    let switch_error = switch_provider_test_hook(&state, AppType::ClaudeDesktop, "legacy-desktop")
-        .expect_err("old DB rows must not bypass the Desktop write guard");
-    assert!(switch_error.to_string().contains("Claude Desktop"));
-    assert_eq!(
         state
             .db
-            .get_current_provider(AppType::ClaudeDesktop.as_str())
-            .expect("query current Desktop provider"),
-        None,
-        "rejected switch must not mutate even the cloned DB current marker"
-    );
+            .save_provider(
+                app.as_str(),
+                &Provider::with_id(
+                    provider_id.to_string(),
+                    "Legacy official Claude row".to_string(),
+                    json!({"env": {"ANTHROPIC_API_KEY": "must-not-be-written"}}),
+                    None,
+                ),
+            )
+            .expect("seed a cloned legacy DB row");
+
+        let switch_error = switch_provider_test_hook(&state, app.clone(), provider_id)
+            .expect_err("old DB rows must not bypass the official Claude write guard");
+        assert!(switch_error.to_string().contains("official CC Switch"));
+        assert_eq!(
+            state
+                .db
+                .get_current_provider(app.as_str())
+                .expect("query current official Claude provider"),
+            None,
+            "rejected switch must not mutate even the cloned DB current marker"
+        );
+    }
 }
 
 #[test]
@@ -506,13 +512,13 @@ fn switch_provider_missing_provider_returns_error() {
 
     let mut config = MultiAppConfig::default();
     config
-        .get_manager_mut(&AppType::Claude)
-        .expect("claude manager")
+        .get_manager_mut(&AppType::Codex)
+        .expect("codex manager")
         .current = "does-not-exist".to_string();
 
     let app_state = create_test_state_with_config(&config).expect("create test state");
 
-    let err = switch_provider_test_hook(&app_state, AppType::Claude, "missing-provider")
+    let err = switch_provider_test_hook(&app_state, AppType::Codex, "missing-provider")
         .expect_err("switching to a missing provider should fail");
 
     let err_str = err.to_string();
@@ -525,12 +531,25 @@ fn switch_provider_missing_provider_returns_error() {
 }
 
 #[test]
-fn switch_provider_updates_claude_live_and_state() {
+fn switch_provider_updates_cometix_live_and_preserves_official_claude() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
 
-    let settings_path = cc_switch_lib::get_claude_settings_path();
+    let official_settings_path = get_claude_settings_path();
+    let official_original =
+        r#"{"env":{"ANTHROPIC_API_KEY":"official-owned"},"owner":"official-cc-switch"}"#;
+    std::fs::create_dir_all(
+        official_settings_path
+            .parent()
+            .expect("official settings parent"),
+    )
+    .expect("create official Claude config dir");
+    std::fs::write(&official_settings_path, official_original)
+        .expect("seed official Claude settings");
+
+    std::fs::create_dir_all(home.join(".hlclaude")).expect("create Cometix config dir");
+    let settings_path = get_claude_cometix_settings_path();
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).expect("create claude settings dir");
     }
@@ -551,14 +570,14 @@ fn switch_provider_updates_claude_live_and_state() {
     let mut config = MultiAppConfig::default();
     {
         let manager = config
-            .get_manager_mut(&AppType::Claude)
-            .expect("claude manager");
+            .get_manager_mut(&AppType::ClaudeCometix)
+            .expect("Cometix manager");
         manager.current = "old-provider".to_string();
         manager.providers.insert(
             "old-provider".to_string(),
             Provider::with_id(
                 "old-provider".to_string(),
-                "Legacy Claude".to_string(),
+                "Legacy Cometix".to_string(),
                 json!({
                     "env": { "ANTHROPIC_API_KEY": "stale-key" }
                 }),
@@ -569,7 +588,7 @@ fn switch_provider_updates_claude_live_and_state() {
             "new-provider".to_string(),
             Provider::with_id(
                 "new-provider".to_string(),
-                "Fresh Claude".to_string(),
+                "Fresh Cometix".to_string(),
                 json!({
                     "env": { "ANTHROPIC_API_KEY": "fresh-key" },
                     "workspace": { "path": "/tmp/new-workspace" }
@@ -581,7 +600,7 @@ fn switch_provider_updates_claude_live_and_state() {
 
     let app_state = create_test_state_with_config(&config).expect("create test state");
 
-    switch_provider_test_hook(&app_state, AppType::Claude, "new-provider")
+    switch_provider_test_hook(&app_state, AppType::ClaudeCometix, "new-provider")
         .expect("switch provider should succeed");
 
     let live_after: serde_json::Value =
@@ -592,12 +611,18 @@ fn switch_provider_updates_claude_live_and_state() {
             .and_then(|env| env.get("ANTHROPIC_API_KEY"))
             .and_then(|key| key.as_str()),
         Some("fresh-key"),
-        "live settings.json should reflect new provider auth"
+        "Cometix settings.json should reflect new provider auth"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&official_settings_path).expect("read official Claude settings"),
+        official_original,
+        "Cometix switching must not rewrite official Claude settings"
     );
 
     let current_id = app_state
         .db
-        .get_current_provider(AppType::Claude.as_str())
+        .get_current_provider(AppType::ClaudeCometix.as_str())
         .expect("get current provider");
     assert_eq!(
         current_id.as_deref(),
@@ -607,17 +632,29 @@ fn switch_provider_updates_claude_live_and_state() {
 
     let providers = app_state
         .db
-        .get_all_providers(AppType::Claude.as_str())
+        .get_all_providers(AppType::ClaudeCometix.as_str())
         .expect("get all providers");
 
     let legacy_provider = providers
         .get("old-provider")
         .expect("legacy provider still exists");
-    // 回填机制：切换前会将 live 配置回填到当前供应商
-    // 这保护了用户在 live 文件中的手动修改
+    // 首次迁移只把 hlclaude 的非凭据偏好回填到供应商；认证字段始终由
+    // 供应商卡片拥有，不能被环境中残留的 live token 覆盖。
     assert_eq!(
-        legacy_provider.settings_config, legacy_live,
-        "previous provider should be backfilled with live config"
+        legacy_provider
+            .settings_config
+            .pointer("/env/ANTHROPIC_API_KEY")
+            .and_then(serde_json::Value::as_str),
+        Some("stale-key"),
+        "previous provider should retain its stored credential"
+    );
+    assert_eq!(
+        legacy_provider
+            .settings_config
+            .pointer("/workspace/path")
+            .and_then(serde_json::Value::as_str),
+        Some("/tmp/workspace"),
+        "previous provider should inherit the existing hlclaude preference"
     );
 
     let new_provider = providers.get("new-provider").expect("new provider exists");
@@ -645,7 +682,7 @@ fn switch_provider_updates_claude_live_and_state() {
     // 验证当前供应商已更新
     let current_id = app_state
         .db
-        .get_current_provider(AppType::Claude.as_str())
+        .get_current_provider(AppType::ClaudeCometix.as_str())
         .expect("get current provider");
     assert_eq!(
         current_id.as_deref(),

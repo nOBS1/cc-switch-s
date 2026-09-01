@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::app_config::{McpApps, McpConfig, McpServer, MultiAppConfig};
 use crate::error::AppError;
@@ -17,6 +18,12 @@ fn should_sync_claude_mcp() -> bool {
 fn should_sync_claude_cometix_mcp() -> bool {
     crate::config::get_claude_cometix_config_dir().exists()
         || crate::config::get_claude_cometix_mcp_path().exists()
+}
+
+fn managed_cometix_mcp_path() -> Result<PathBuf, AppError> {
+    let path = crate::config::get_claude_cometix_mcp_path();
+    crate::fork_policy::ensure_cometix_managed_config_path_isolated(&path)?;
+    Ok(path)
 }
 
 /// 返回已启用的 MCP 服务器（过滤 enabled==true）
@@ -44,6 +51,7 @@ fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
 
 /// 将 config.json 中 enabled==true 的项投影写入 ~/.claude.json
 pub fn sync_enabled_to_claude(config: &MultiAppConfig) -> Result<(), AppError> {
+    crate::fork_policy::ensure_app_management_allowed(&crate::app_config::AppType::Claude)?;
     if !should_sync_claude_mcp() {
         return Ok(());
     }
@@ -122,7 +130,7 @@ pub fn import_from_claude(config: &mut MultiAppConfig) -> Result<usize, AppError
 /// 从 Cometix 独立配置域的 ~/.hlclaude/.claude.json 导入 mcpServers。
 /// 已存在的服务器仅启用 Cometix，不修改官方 Claude 或其他应用状态。
 pub fn import_from_claude_cometix(config: &mut MultiAppConfig) -> Result<usize, AppError> {
-    let path = crate::config::get_claude_cometix_mcp_path();
+    let path = managed_cometix_mcp_path()?;
     let map = crate::claude_mcp::read_mcp_servers_map_at(&path)?;
     let servers = config.mcp.servers.get_or_insert_with(HashMap::new);
 
@@ -186,6 +194,7 @@ pub fn sync_single_server_to_claude(
     id: &str,
     server_spec: &Value,
 ) -> Result<(), AppError> {
+    crate::fork_policy::ensure_app_management_allowed(&crate::app_config::AppType::Claude)?;
     if !should_sync_claude_mcp() {
         return Ok(());
     }
@@ -206,10 +215,10 @@ pub fn sync_single_server_to_claude_cometix(
     id: &str,
     server_spec: &Value,
 ) -> Result<(), AppError> {
+    let path = managed_cometix_mcp_path()?;
     if !should_sync_claude_cometix_mcp() {
         return Ok(());
     }
-    let path = crate::config::get_claude_cometix_mcp_path();
     let mut updated = crate::claude_mcp::read_mcp_servers_map_at(&path)?;
     updated.insert(id.to_string(), server_spec.clone());
     crate::claude_mcp::set_mcp_servers_map_at(&path, &updated)
@@ -217,6 +226,7 @@ pub fn sync_single_server_to_claude_cometix(
 
 /// 从 Claude live 配置中移除单个 MCP 服务器
 pub fn remove_server_from_claude(id: &str) -> Result<(), AppError> {
+    crate::fork_policy::ensure_app_management_allowed(&crate::app_config::AppType::Claude)?;
     if !should_sync_claude_mcp() {
         return Ok(());
     }
@@ -232,10 +242,10 @@ pub fn remove_server_from_claude(id: &str) -> Result<(), AppError> {
 
 /// 从 Cometix 的独立配置域移除单个 MCP 服务器。
 pub fn remove_server_from_claude_cometix(id: &str) -> Result<(), AppError> {
+    let path = managed_cometix_mcp_path()?;
     if !should_sync_claude_cometix_mcp() {
         return Ok(());
     }
-    let path = crate::config::get_claude_cometix_mcp_path();
     let mut current = crate::claude_mcp::read_mcp_servers_map_at(&path)?;
     current.remove(id);
     crate::claude_mcp::set_mcp_servers_map_at(&path, &current)

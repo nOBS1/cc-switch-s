@@ -15,7 +15,7 @@ use support::{
 };
 
 #[test]
-fn sync_claude_provider_writes_live_settings() {
+fn sync_current_providers_preserves_official_claude_live_settings() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
@@ -44,17 +44,20 @@ fn sync_claude_provider_writes_live_settings() {
     manager.providers.insert("prov-1".to_string(), provider);
     manager.current = "prov-1".to_string();
 
-    ConfigService::sync_current_providers_to_live(&mut config).expect("sync live settings");
-
     let settings_path = get_claude_settings_path();
-    assert!(
-        settings_path.exists(),
-        "live settings should be written to {}",
-        settings_path.display()
-    );
+    fs::create_dir_all(settings_path.parent().expect("official settings parent"))
+        .expect("create official settings parent");
+    let official_sentinel = json!({"official": true});
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&official_sentinel).expect("serialize sentinel"),
+    )
+    .expect("seed official settings");
+
+    ConfigService::sync_current_providers_to_live(&mut config).expect("sync managed live settings");
 
     let live_value: serde_json::Value = read_json_file(&settings_path).expect("read live file");
-    assert_eq!(live_value, provider_config);
+    assert_eq!(live_value, official_sentinel);
 
     // 确认 SSOT 中的供应商也同步了最新内容
     let updated = config
@@ -785,7 +788,7 @@ command = "echo"
 }
 
 #[test]
-fn sync_claude_enabled_mcp_projects_to_user_config() {
+fn sync_claude_enabled_mcp_rejects_official_config_mutation() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
@@ -819,26 +822,20 @@ fn sync_claude_enabled_mcp_projects_to_user_config() {
         }),
     );
 
-    cc_switch_lib::sync_enabled_to_claude(&config).expect("sync Claude MCP");
-
     let claude_path = cc_switch_lib::get_claude_mcp_path();
-    assert!(claude_path.exists(), "claude config should exist");
-    let text = fs::read_to_string(&claude_path).expect("read .claude.json");
-    let value: serde_json::Value = serde_json::from_str(&text).expect("parse claude json");
-    let servers = value
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .expect("mcpServers map");
-    assert_eq!(servers.len(), 1, "only enabled entries should be written");
-    let enabled = servers.get("stdio-enabled").expect("enabled entry");
-    assert_eq!(
-        enabled
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default(),
-        "echo"
+    let sentinel = r#"{"official":true}"#;
+    fs::write(&claude_path, sentinel).expect("seed official Claude MCP config");
+
+    let result = cc_switch_lib::sync_enabled_to_claude(&config);
+
+    assert!(
+        result.is_err(),
+        "official Claude MCP mutation must be rejected"
     );
-    assert!(servers.get("http-disabled").is_none());
+    assert_eq!(
+        fs::read_to_string(&claude_path).expect("read official Claude config"),
+        sentinel
+    );
 }
 
 #[test]

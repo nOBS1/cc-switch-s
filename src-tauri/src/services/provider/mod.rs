@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::app_config::AppType;
 use crate::database::{validate_cost_multiplier, validate_pricing_source};
 use crate::error::AppError;
+use crate::fork_policy::app_management_allowed;
 use crate::provider::{Provider, UsageResult};
 use crate::services::mcp::McpService;
 use crate::settings::CustomEndpoint;
@@ -977,11 +978,11 @@ mod tests {
         db.save_provider("gemini", &unrelated).expect("save c");
     }
 
-    /// Saving the active provider while takeover has never been enabled must
-    /// rewrite the real live file immediately.
+    /// Saving the active Cometix provider while takeover has never been
+    /// enabled must rewrite only the independently managed live file.
     #[tokio::test]
     #[serial]
-    async fn update_current_claude_provider_writes_live_when_proxy_never_enabled() {
+    async fn update_current_cometix_provider_writes_live_when_proxy_never_enabled() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -989,7 +990,7 @@ mod tests {
         let state = AppState::new(db.clone());
         let original = Provider::with_id(
             "p1".into(),
-            "Claude A".into(),
+            "Cometix A".into(),
             json!({
                 "env": {
                     "ANTHROPIC_AUTH_TOKEN": "token-a",
@@ -998,22 +999,23 @@ mod tests {
             }),
             None,
         );
-        db.save_provider("claude", &original)
+        db.save_provider(AppType::ClaudeCometix.as_str(), &original)
             .expect("save provider");
-        db.set_current_provider("claude", "p1")
+        db.set_current_provider(AppType::ClaudeCometix.as_str(), "p1")
             .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some("p1"))
+        crate::settings::set_current_provider(&AppType::ClaudeCometix, Some("p1"))
             .expect("set local current provider");
-        write_live_with_common_config_for_state(&state, &AppType::Claude, &original)
-            .expect("seed live file");
+        write_live_with_common_config_for_state(&state, &AppType::ClaudeCometix, &original)
+            .expect("seed Cometix live file");
 
         let mut updated = original.clone();
         updated.settings_config["env"]["ANTHROPIC_BASE_URL"] =
             Value::String("https://api.new.example".into());
-        ProviderService::update(&state, AppType::Claude, None, updated)
-            .expect("update current provider");
+        ProviderService::update(&state, AppType::ClaudeCometix, None, updated)
+            .expect("update current Cometix provider");
 
-        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
+        let live: Value = read_json_file(&get_claude_cometix_settings_path())
+            .expect("read Cometix live settings");
         assert_eq!(
             live["env"]["ANTHROPIC_BASE_URL"].as_str(),
             Some("https://api.new.example")
@@ -1073,10 +1075,11 @@ mod tests {
         );
     }
 
-    /// A stale backup row must be refreshed but must not divert the live write.
+    /// A stale backup row for a managed proxy app must be refreshed but must
+    /// not divert the live write.
     #[tokio::test]
     #[serial]
-    async fn update_current_claude_provider_writes_live_when_backup_row_is_stale() {
+    async fn update_current_gemini_provider_writes_live_when_backup_row_is_stale() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -1084,25 +1087,25 @@ mod tests {
         let state = AppState::new(db.clone());
         let original = Provider::with_id(
             "p1".into(),
-            "Claude A".into(),
+            "Gemini A".into(),
             json!({
                 "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token-a",
-                    "ANTHROPIC_BASE_URL": "https://api.old.example"
+                    "GEMINI_API_KEY": "token-a",
+                    "GOOGLE_GEMINI_BASE_URL": "https://api.old.example"
                 }
             }),
             None,
         );
-        db.save_provider("claude", &original)
+        db.save_provider(AppType::Gemini.as_str(), &original)
             .expect("save provider");
-        db.set_current_provider("claude", "p1")
+        db.set_current_provider(AppType::Gemini.as_str(), "p1")
             .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some("p1"))
+        crate::settings::set_current_provider(&AppType::Gemini, Some("p1"))
             .expect("set local current provider");
-        write_live_with_common_config_for_state(&state, &AppType::Claude, &original)
-            .expect("seed live file");
+        write_live_with_common_config_for_state(&state, &AppType::Gemini, &original)
+            .expect("seed Gemini live file");
         db.save_live_backup(
-            "claude",
+            AppType::Gemini.as_str(),
             &serde_json::to_string(&original.settings_config).expect("serialize backup"),
         )
         .await
@@ -1110,29 +1113,30 @@ mod tests {
         assert!(!state.proxy_service.is_running().await);
 
         let mut updated = original.clone();
-        updated.settings_config["env"]["ANTHROPIC_BASE_URL"] =
+        updated.settings_config["env"]["GOOGLE_GEMINI_BASE_URL"] =
             Value::String("https://api.new.example".into());
-        ProviderService::update(&state, AppType::Claude, None, updated)
-            .expect("update current provider");
+        ProviderService::update(&state, AppType::Gemini, None, updated)
+            .expect("update current Gemini provider");
 
-        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
+        let live = crate::gemini_config::read_gemini_env().expect("read Gemini live env");
         assert_eq!(
-            live["env"]["ANTHROPIC_BASE_URL"].as_str(),
+            live.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
             Some("https://api.new.example")
         );
         let backup = db
-            .get_live_backup("claude")
+            .get_live_backup(AppType::Gemini.as_str())
             .await
             .expect("read backup")
             .expect("backup remains");
         assert!(backup.original_config.contains("https://api.new.example"));
     }
 
-    /// An enabled flag left behind by an interrupted teardown is not enough to
-    /// suppress a live write when neither placeholder nor backup evidence exists.
+    /// An enabled flag left behind by an interrupted Gemini teardown is not
+    /// enough to suppress a live write when neither placeholder nor backup
+    /// evidence exists.
     #[tokio::test]
     #[serial]
-    async fn update_current_claude_provider_ignores_enabled_flag_without_evidence() {
+    async fn update_current_gemini_provider_ignores_enabled_flag_without_evidence() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -1140,25 +1144,25 @@ mod tests {
         let state = AppState::new(db.clone());
         let original = Provider::with_id(
             "p1".into(),
-            "Claude A".into(),
+            "Gemini A".into(),
             json!({
                 "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token-a",
-                    "ANTHROPIC_BASE_URL": "https://api.old.example"
+                    "GEMINI_API_KEY": "token-a",
+                    "GOOGLE_GEMINI_BASE_URL": "https://api.old.example"
                 }
             }),
             None,
         );
-        db.save_provider("claude", &original)
+        db.save_provider("gemini", &original)
             .expect("save provider");
-        db.set_current_provider("claude", "p1")
+        db.set_current_provider("gemini", "p1")
             .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Claude, Some("p1"))
+        crate::settings::set_current_provider(&AppType::Gemini, Some("p1"))
             .expect("set local current provider");
-        write_live_with_common_config_for_state(&state, &AppType::Claude, &original)
+        write_live_with_common_config_for_state(&state, &AppType::Gemini, &original)
             .expect("seed live file");
         let mut config = db
-            .get_proxy_config_for_app("claude")
+            .get_proxy_config_for_app("gemini")
             .await
             .expect("read proxy config");
         config.enabled = true;
@@ -1168,14 +1172,14 @@ mod tests {
         assert!(!state.proxy_service.is_running().await);
 
         let mut updated = original.clone();
-        updated.settings_config["env"]["ANTHROPIC_BASE_URL"] =
+        updated.settings_config["env"]["GOOGLE_GEMINI_BASE_URL"] =
             Value::String("https://api.new.example".into());
-        ProviderService::update(&state, AppType::Claude, None, updated)
+        ProviderService::update(&state, AppType::Gemini, None, updated)
             .expect("update current provider");
 
-        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
+        let live = crate::gemini_config::read_gemini_env().expect("read Gemini live env");
         assert_eq!(
-            live["env"]["ANTHROPIC_BASE_URL"].as_str(),
+            live.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
             Some("https://api.new.example")
         );
     }
@@ -1803,8 +1807,7 @@ command = "legacy-cmd"
 
     #[tokio::test]
     #[serial]
-    async fn update_current_claude_provider_syncs_live_when_proxy_takeover_detected_without_backup()
-    {
+    async fn update_current_official_claude_provider_never_rewrites_taken_over_live() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -1862,11 +1865,14 @@ command = "legacy-cmd"
         )
         .expect("seed taken-over live file");
 
-        let proxy_info = state
+        state
             .proxy_service
             .start()
             .await
             .expect("start proxy service");
+
+        let official_before =
+            fs::read(get_claude_settings_path()).expect("snapshot official Claude live config");
 
         let updated = Provider::with_id(
             "p1".into(),
@@ -1882,47 +1888,24 @@ command = "legacy-cmd"
             None,
         );
 
-        ProviderService::update(&state, AppType::Claude, None, updated.clone())
-            .expect("update current provider");
+        let update_error = ProviderService::update(&state, AppType::Claude, None, updated)
+            .expect_err("private build must reject official Claude live projection");
+        let official_after =
+            fs::read(get_claude_settings_path()).expect("read official Claude live config");
 
-        let backup = db
-            .get_live_backup("claude")
+        state
+            .proxy_service
+            .stop()
             .await
-            .expect("get live backup")
-            .expect("backup exists");
-        let stored_provider = db
-            .get_provider_by_id("p1", "claude")
-            .expect("get stored provider")
-            .expect("stored provider exists");
-        let expected_backup =
-            serde_json::to_string(&stored_provider.settings_config).expect("serialize");
-        assert_eq!(backup.original_config, expected_backup);
+            .expect("stop proxy service");
 
-        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
-        assert_eq!(
-            live.get("permissions"),
-            updated.settings_config.get("permissions"),
-            "provider edits should propagate into Claude live config during takeover"
-        );
-        assert_eq!(
-            live.get("env")
-                .and_then(|env| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|v| v.as_str()),
-            Some("PROXY_MANAGED"),
-            "takeover placeholder should stay intact"
-        );
-        assert_eq!(
-            live.get("env")
-                .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
-                .and_then(|v| v.as_str()),
-            Some(format!("http://127.0.0.1:{}", proxy_info.port).as_str()),
-            "proxy base URL should stay intact"
-        );
         assert!(
-            live.get("env")
-                .and_then(|env| env.get("ANTHROPIC_MODEL"))
-                .is_none(),
-            "model override should be removed in takeover live config"
+            update_error.to_string().contains("Official Claude Code"),
+            "rejection must identify the disabled official-Claude boundary: {update_error}"
+        );
+        assert_eq!(
+            official_after, official_before,
+            "the private build must leave official Claude live bytes untouched"
         );
     }
 
@@ -4116,7 +4099,7 @@ wire_api = "responses"
 
     #[test]
     #[serial]
-    fn sync_universal_to_apps_reprojects_current_child_to_live() {
+    fn sync_universal_to_apps_preserves_official_claude_in_private_fork() {
         with_test_home(|state, _home| {
             let mut universal = UniversalProvider::new(
                 "shared".to_string(),
@@ -4135,9 +4118,13 @@ wire_api = "responses"
                 .save_universal_provider(&universal)
                 .expect("save universal provider");
 
-            let child = universal
+            let mut child = universal
                 .to_claude_provider()
                 .expect("claude child provider");
+            child.settings_config["env"]["ANTHROPIC_BASE_URL"] =
+                Value::String("https://api.official-sentinel.example".to_string());
+            child.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] =
+                Value::String("official-sentinel-token".to_string());
             state
                 .db
                 .save_provider("claude", &child)
@@ -4149,10 +4136,8 @@ wire_api = "responses"
             crate::settings::set_current_provider(&AppType::Claude, Some(&child.id))
                 .expect("set local current child");
 
-            let mut old_live = child.settings_config.clone();
-            old_live["env"]["ANTHROPIC_BASE_URL"] =
-                Value::String("https://api.old.example".to_string());
-            write_json_file(&get_claude_settings_path(), &old_live).expect("seed old live");
+            write_json_file(&get_claude_settings_path(), &child.settings_config)
+                .expect("seed official live sentinel");
 
             ProviderService::sync_universal_to_apps(state, "shared")
                 .expect("sync universal provider");
@@ -4160,11 +4145,94 @@ wire_api = "responses"
             let live: Value = read_json_file(&get_claude_settings_path()).expect("read live");
             assert_eq!(
                 live["env"]["ANTHROPIC_BASE_URL"].as_str(),
-                Some("https://api.new.example")
+                Some("https://api.official-sentinel.example")
             );
             assert_eq!(
                 live["env"]["ANTHROPIC_AUTH_TOKEN"].as_str(),
-                Some("new-key")
+                Some("official-sentinel-token")
+            );
+
+            let stored_child = state
+                .db
+                .get_provider_by_id(&child.id, AppType::Claude.as_str())
+                .expect("query official child")
+                .expect("official child remains in legacy database");
+            assert_eq!(
+                stored_child.settings_config["env"]["ANTHROPIC_BASE_URL"].as_str(),
+                Some("https://api.official-sentinel.example")
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn upsert_universal_strips_official_claude_target_in_private_fork() {
+        with_test_home(|state, _home| {
+            let mut universal = UniversalProvider::new(
+                "shared".to_string(),
+                "Shared Relay".to_string(),
+                "custom".to_string(),
+                "https://api.example.com".to_string(),
+                "secret".to_string(),
+            );
+            universal.apps.claude = true;
+            universal.models.claude = Some(ClaudeModelConfig {
+                model: Some("claude-sonnet-4".to_string()),
+                ..Default::default()
+            });
+
+            ProviderService::upsert_universal(state, universal).expect("save universal provider");
+
+            let stored = ProviderService::get_universal(state, "shared")
+                .expect("load universal provider")
+                .expect("stored universal provider");
+            assert!(!stored.apps.claude);
+            assert!(stored.models.claude.is_none());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn upsert_universal_preserves_hidden_legacy_claude_data() {
+        with_test_home(|state, _home| {
+            let mut legacy = UniversalProvider::new(
+                "legacy".to_string(),
+                "Legacy Relay".to_string(),
+                "custom".to_string(),
+                "https://old.example.com".to_string(),
+                "old-secret".to_string(),
+            );
+            legacy.apps.claude = true;
+            legacy.models.claude = Some(ClaudeModelConfig {
+                model: Some("legacy-claude-model".to_string()),
+                ..Default::default()
+            });
+            state
+                .db
+                .save_universal_provider(&legacy)
+                .expect("seed legacy universal provider");
+
+            let mut edited = legacy.clone();
+            edited.name = "Edited Relay".to_string();
+            edited.apps.claude = false;
+            edited.models.claude = None;
+            ProviderService::upsert_universal(state, edited).expect("update universal provider");
+
+            let stored = ProviderService::get_universal(state, "legacy")
+                .expect("load universal provider")
+                .expect("stored universal provider");
+            assert_eq!(stored.name, "Edited Relay");
+            assert!(
+                stored.apps.claude,
+                "hidden legacy flag should remain recoverable"
+            );
+            assert_eq!(
+                stored
+                    .models
+                    .claude
+                    .and_then(|models| models.model)
+                    .as_deref(),
+                Some("legacy-claude-model")
             );
         });
     }
@@ -6895,8 +6963,17 @@ impl ProviderService {
     /// 添加或更新统一供应商（不自动同步，需手动调用 sync_universal_to_apps）
     pub fn upsert_universal(
         state: &AppState,
-        provider: UniversalProvider,
+        mut provider: UniversalProvider,
     ) -> Result<bool, AppError> {
+        if !app_management_allowed(&AppType::Claude) {
+            if let Some(existing) = state.db.get_universal_provider(&provider.id)? {
+                provider.apps.claude = existing.apps.claude;
+                provider.models.claude = existing.models.claude;
+            } else {
+                provider.apps.claude = false;
+                provider.models.claude = None;
+            }
+        }
         // 保存统一供应商
         state.db.save_universal_provider(&provider)?;
 
@@ -6913,7 +6990,7 @@ impl ProviderService {
 
         // 删除生成的子供应商
         if let Some(p) = provider {
-            if p.apps.claude {
+            if p.apps.claude && app_management_allowed(&AppType::Claude) {
                 let claude_id = format!("universal-claude-{id}");
                 let _ = state.db.delete_provider("claude", &claude_id);
             }
@@ -6943,24 +7020,28 @@ impl ProviderService {
         let mut live_failures = Vec::new();
 
         // 同步到 Claude
-        if let Some(mut claude_provider) = provider.to_claude_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&claude_provider.id, "claude")? {
-                let mut merged = existing.settings_config.clone();
-                Self::merge_json(&mut merged, &claude_provider.settings_config);
-                claude_provider.settings_config = merged;
+        if app_management_allowed(&AppType::Claude) {
+            if let Some(mut claude_provider) = provider.to_claude_provider() {
+                // 合并已有配置
+                if let Some(existing) =
+                    state.db.get_provider_by_id(&claude_provider.id, "claude")?
+                {
+                    let mut merged = existing.settings_config.clone();
+                    Self::merge_json(&mut merged, &claude_provider.settings_config);
+                    claude_provider.settings_config = merged;
+                }
+                state.db.save_provider("claude", &claude_provider)?;
+                Self::project_universal_child_to_live(
+                    state,
+                    AppType::Claude,
+                    &claude_provider.id,
+                    &mut live_failures,
+                );
+            } else {
+                // 如果禁用了 Claude，删除对应的子供应商
+                let claude_id = format!("universal-claude-{id}");
+                let _ = state.db.delete_provider("claude", &claude_id);
             }
-            state.db.save_provider("claude", &claude_provider)?;
-            Self::project_universal_child_to_live(
-                state,
-                AppType::Claude,
-                &claude_provider.id,
-                &mut live_failures,
-            );
-        } else {
-            // 如果禁用了 Claude，删除对应的子供应商
-            let claude_id = format!("universal-claude-{id}");
-            let _ = state.db.delete_provider("claude", &claude_id);
         }
 
         // 同步到 Codex
@@ -7022,6 +7103,10 @@ impl ProviderService {
         child_id: &str,
         failures: &mut Vec<String>,
     ) {
+        if !app_management_allowed(&app_type) {
+            return;
+        }
+
         let is_current = match crate::settings::get_effective_current_provider(&state.db, &app_type)
         {
             Ok(current) => current.as_deref() == Some(child_id),

@@ -14,15 +14,15 @@ vi.mock("react-i18next", () => ({
 }));
 
 describe("AppSwitcher", () => {
-  it("shows Claude Code Cometix as an additive top-level app", () => {
+  it("only exposes the isolated Cometix Claude entry in the private fork", () => {
     render(<AppSwitcher activeApp="claude" onSwitch={vi.fn()} />);
 
     expect(
       screen.getByRole("button", { name: "Claude Code（Cometix）" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Claude Code" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Claude Code" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Claude Desktop" }),
     ).not.toBeInTheDocument();
